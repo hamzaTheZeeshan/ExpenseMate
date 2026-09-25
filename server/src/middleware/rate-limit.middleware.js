@@ -13,3 +13,17 @@ export const apiLimiter = rateLimit({
     message: "Too many requests, please try again later.",
   },
 });
+
+// Stricter limiter for credential-guessing / account-enumeration surfaces:
+// login, signup, and Google sign-in (which reveals whether an email is
+// already registered as a local account via its 409 response).
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // requests per window per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    status: "error",
+    message: "Too many attempts, please try again later.",
+  },
+});

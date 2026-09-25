@@ -11,7 +11,9 @@ import {
 } from "../utils/jwt.js";
 import * as userRepository from "../repositories/user.repository.js";
 
-const googleClient = new OAuth2Client(env.googleClientId);
+const googleClient = env.googleClientId
+  ? new OAuth2Client(env.googleClientId)
+  : null;
 
 function issueTokens(user) {
   const payload = { sub: user.id, email: user.email };
@@ -62,6 +64,10 @@ export async function login(email, password) {
 }
 
 export async function googleAuth(idToken) {
+  if (!googleClient) {
+    throw new AppError("Google sign-in is not configured", 500);
+  }
+
   const ticket = await googleClient.verifyIdToken({
     idToken,
     audience: env.googleClientId,
@@ -71,28 +77,49 @@ export async function googleAuth(idToken) {
     throw new AppError("Invalid Google token", 401);
   }
 
+  // Google can issue tokens for unverified email addresses (e.g. an invite
+  // pending confirmation). Refuse those outright — we never want to create
+  // or match an account against an email the holder hasn't proven control of.
+  if (payload.email_verified === false) {
+    throw new AppError("Google account email is not verified", 401);
+  }
+
   const { sub: googleId, email, name, picture } = payload;
 
+  // Case A: already linked — normal login.
   let user = await userRepository.findByGoogleId(googleId);
-
-  if (!user) {
-    const existingByEmail = await userRepository.findByEmail(email);
-
-    if (existingByEmail) {
-      // Existing local account with the same email — link the Google ID
-      // rather than creating a duplicate user.
-      user = await userRepository.linkGoogleId(existingByEmail.id, googleId);
-    } else {
-      user = await userRepository.create({
-        email,
-        fullName: name,
-        avatarUrl: picture,
-        provider: "google",
-        googleId,
-        passwordHash: null,
-      });
-    }
+  if (user) {
+    const tokens = issueTokens(user);
+    return { user, ...tokens };
   }
+
+  // Case B: no googleId match, but a local (password-based) account already
+  // owns this email. Do NOT auto-link and do NOT log in — that would let
+  // anyone who can obtain a Google-verified token for this address (not
+  // necessarily the account owner) take over an existing password account.
+  // Point them at password login instead.
+  const existingByEmail = await userRepository.findByEmail(email);
+  if (existingByEmail && existingByEmail.provider === "local") {
+    throw new AppError(
+      "An account already exists with this email. Please sign in with your password.",
+      409,
+    );
+  }
+
+  // Case C: no user by googleId or email — brand new Google-only signup.
+  // (This also covers the edge case where existingByEmail.provider is
+  // already 'google' but somehow lacked a googleId match above — treat any
+  // non-local existing-by-email match the same way a fresh signup would be
+  // unsafe to silently repurpose, so we fall through to creating/using it
+  // via googleId only, never by email identity alone.)
+  user = await userRepository.create({
+    email,
+    fullName: name,
+    avatarUrl: picture,
+    provider: "google",
+    googleId,
+    passwordHash: null,
+  });
 
   const tokens = issueTokens(user);
   return { user, ...tokens };

@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Provider {
+  local
+  google
+
+  @@map("provider")
+}
+
+enum TxnType {
+  income
+  expense
+
+  @@map("txn_type")
+}
+
+enum BudgetPeriod {
+  weekly
+  monthly
+  yearly
+
+  @@map("budget_period")
+}
+
+model User {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                 String    @unique
+  passwordHash          String?   @map("password_hash")
+  provider              String    @default("local") // CHECK (provider in ('local','google')) added via raw SQL migration
+  googleId              String?   @unique @map("google_id")
+  fullName              String?   @map("full_name")
+  avatarUrl             String?   @map("avatar_url")
+  currency              String?   @default("USD")
+  isEmailVerified        Boolean?  @default(false) @map("is_email_verified")
+  resetPasswordToken    String?   @map("reset_password_token")
+  resetPasswordExpires  DateTime? @map("reset_password_expires") @db.Timestamptz
+  createdAt             DateTime? @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime? @default(now()) @map("updated_at") @db.Timestamptz
+
+  categories   Category[]
+  cards        Card[]
+  transactions Transaction[]
+  budgets      Budget[]
+
+  @@index([email], name: "idx_users_email")
+  @@index([googleId], name: "idx_users_google_id")
+  @@map("users")
+}
+
+model Category {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String?   @map("user_id") @db.Uuid
+  name      String
+  icon      String?
+  color     String?
+  isDefault Boolean?  @default(false) @map("is_default")
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+  budgets      Budget[]
+
+  @@unique([userId, name])
+  @@map("categories")
+}
+
+model Card {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  nickname     String
+  cardType     String?   @map("card_type")
+  lastFour     String    @map("last_four") // CHECK (char_length = 4) added via raw SQL migration
+  expiryMonth  Int?      @map("expiry_month") // CHECK between 1-12 added via raw SQL migration
+  expiryYear   Int?      @map("expiry_year")
+  balance      Decimal?  @default(0) @db.Decimal(12, 2)
+  creditLimit  Decimal?  @default(0) @map("credit_limit") @db.Decimal(12, 2)
+  creditUsed   Decimal?  @default(0) @map("credit_used") @db.Decimal(12, 2)
+  currency     String?   @default("USD")
+  colorTheme   String?   @default("#000000") @map("color_theme")
+  isDefault    Boolean?  @default(false) @map("is_default")
+  createdAt    DateTime? @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime? @default(now()) @map("updated_at") @db.Timestamptz
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([userId], name: "idx_cards_user")
+  @@map("cards")
+}
+
+model Transaction {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  cardId      String?   @map("card_id") @db.Uuid
+  categoryId  String?   @map("category_id") @db.Uuid
+  type        String    // CHECK (type in ('income','expense')) added via raw SQL migration
+  amount      Decimal   @db.Decimal(12, 2)
+  merchant    String?
+  note        String?
+  occurredAt  DateTime  @default(now()) @map("occurred_at") @db.Timestamptz
+  createdAt   DateTime? @default(now()) @map("created_at") @db.Timestamptz
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  card     Card?     @relation(fields: [cardId], references: [id], onDelete: SetNull)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId, occurredAt(sort: Desc)], name: "idx_transactions_user_date")
+  @@index([categoryId], name: "idx_transactions_category")
+  @@map("transactions")
+}
+
+model Budget {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  categoryId String?   @map("category_id") @db.Uuid
+  amount     Decimal   @db.Decimal(12, 2)
+  period     String    @default("monthly") // CHECK (period in ('weekly','monthly','yearly')) added via raw SQL migration
+  startDate  DateTime  @map("start_date") @db.Date
+  endDate    DateTime? @map("end_date") @db.Date
+  createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    Category?     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  budgetAlerts BudgetAlert[]
+
+  @@unique([userId, categoryId, period, startDate])
+  @@index([userId], name: "idx_budgets_user")
+  @@map("budgets")
+}
+
+model BudgetAlert {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  budgetId          String    @map("budget_id") @db.Uuid
+  thresholdPercent  Int       @default(80) @map("threshold_percent")
+  triggeredAt       DateTime? @map("triggered_at") @db.Timestamptz
+  isRead            Boolean?  @default(false) @map("is_read")
+  createdAt         DateTime? @default(now()) @map("created_at") @db.Timestamptz
+
+  budget Budget @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+
+  @@map("budget_alerts")
+}

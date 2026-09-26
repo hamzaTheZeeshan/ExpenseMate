@@ -144,7 +144,7 @@ const REDIRECT_AFTER_SIGNUP = "/dashboard";
 // (APIs & Services → Credentials → OAuth 2.0 Client IDs). This is what was
 // missing — GoogleLogin cannot render/authenticate without a provider that
 // has a real client ID, and it throws on mount if there's no provider at all.
-const GOOGLE_CLIENT_ID = "__GOOGLE_CLIENT_ID__";
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 /* ───────────────────────────────────────────────────────────── */
 
 interface SignUpPayload {

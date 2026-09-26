@@ -1,5 +1,11 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import {signin} from './Assets';
+import {
+  GoogleOAuthProvider,
+  GoogleLogin,
+  type CredentialResponse,
+} from "@react-oauth/google";
+import { signin } from "./Assets";
+
 /* ──────────────── STYLES (inlined, no separate CSS file) ──────────────── */
 const styles = `
 @import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;800&display=swap");
@@ -53,7 +59,7 @@ const styles = `
 .sw-art img { width: 100%; max-width: 320px; height: auto; display: block; }
 
 /* ── right form ── */
-.sw-form { padding: 120px 36px 28px; }
+.sw-form { padding: 40px 36px 28px; }
 .sw-form h2 { margin: 0; font-size: 36px; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
 .sw-sub { margin: 6px 0 26px; color: var(--muted); font-size: 17px; }
 
@@ -100,8 +106,6 @@ const styles = `
 .sw-btn--primary { margin-top: 8px; background: #000; color: #fff; border: 0; }
 .sw-btn--primary:hover { background: #222; }
 .sw-btn--primary:disabled { opacity: .6; cursor: not-allowed; }
-.sw-btn--ghost { background: #fff; color: var(--ink); border: 1px solid #cfd4c8; font-weight: 500; }
-.sw-btn--ghost:hover { background: #f6f8f2; }
 .sw-btn:focus-visible { outline: 3px solid var(--lime-deep); outline-offset: 2px; }
 
 .sw-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--muted); font-size: 12px; }
@@ -110,6 +114,10 @@ const styles = `
 .sw-foot { margin: 18px 0 0; text-align: center; font-size: 13px; color: var(--muted); }
 .sw-foot a { color: var(--lime-deep); font-weight: 600; text-decoration: none; margin-left: 4px; }
 .sw-foot a:hover { text-decoration: underline; }
+
+.sw-google-wrap { width: 100%; }
+.sw-google-wrap > div { width: 100% !important; }
+.sw-google-loading { margin: 8px 0 0; text-align: center; font-size: 12.5px; color: var(--muted); }
 
 /* ── responsive ── */
 @media (max-width: 960px) {
@@ -124,16 +132,19 @@ const styles = `
 }
 `;
 
-/* ──────────────── API CONFIG (replace these) ──────────────── */
+/* ──────────────── CONFIG (replace these with your real values) ──────────────── */
 const API_BASE_URL = "http://localhost:5000/api/v1"; // e.g. import.meta.env.VITE_API_URL
 const SIGNIN_ENDPOINT = "/auth/login"; // POST { email, password }
-const GOOGLE_AUTH_URL = `${API_BASE_URL}/auth/google`; // OAuth redirect
+const GOOGLE_AUTH_ENDPOINT = "/auth/google"; // POST { idToken }
 const SIGN_UP_PATH = "/signup"; // where "Sign up" link goes
 const FORGOT_PASSWORD_PATH = "/forgot-password";
 const REDIRECT_AFTER_SIGNIN = "/dashboard";
-// Same piggy-bank illustration used on the Sign Up page, so both screens match.
-// TODO: replace with a real image path or data: URI — this placeholder will
-// render as a broken image until you do.
+
+// REQUIRED: your Google OAuth Web Client ID from Google Cloud Console
+// (APIs & Services → Credentials → OAuth 2.0 Client IDs). Must match the
+// one used on the Sign Up page. GoogleLogin cannot render/authenticate
+// without a provider that has a real client ID.
+const GOOGLE_CLIENT_ID = "__GOOGLE_CLIENT_ID__";
 /* ───────────────────────────────────────────────────────────── */
 
 interface SignInPayload {
@@ -147,6 +158,10 @@ interface FormErrors {
   form?: string;
 }
 
+interface AuthSuccess {
+  accessToken: string;
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function validate(v: SignInPayload): FormErrors {
@@ -156,18 +171,40 @@ function validate(v: SignInPayload): FormErrors {
   return e;
 }
 
-async function signInRequest(payload: SignInPayload): Promise<void> {
+async function signInRequest(payload: SignInPayload): Promise<AuthSuccess> {
   const res = await fetch(`${API_BASE_URL}${SIGNIN_ENDPOINT}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // credentials: "include", // uncomment if your API sets cookies
+    credentials: "include", // required so the refreshToken cookie is set
     body: JSON.stringify(payload),
   });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok || !body.success) {
     throw new Error(body.message ?? "Couldn't sign you in. Check your details and try again.");
   }
-  // const data = await res.json(); // e.g. store token here if your API returns one
+
+  return { accessToken: body.data.accessToken };
+}
+
+// idToken here is a Google ID token (JWT), verified server-side via
+// OAuth2Client.verifyIdToken in authService.googleAuth — NOT an access token.
+async function googleAuthRequest(idToken: string): Promise<AuthSuccess> {
+  const res = await fetch(`${API_BASE_URL}${GOOGLE_AUTH_ENDPOINT}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ idToken }),
+  });
+
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok || !body.success) {
+    throw new Error(body.message ?? "Google sign-in failed. Please try again.");
+  }
+
+  return { accessToken: body.data.accessToken };
 }
 
 /* ───────────── small icon helpers ───────────── */
@@ -185,14 +222,6 @@ const EyeIcon = ({ off }: { off: boolean }) => (
     <circle cx="12" cy="12" r="2.5" />
     {off && <path d="M4 4l16 16" />}
   </Svg>
-);
-const GoogleIcon = () => (
-  <svg viewBox="0 0 48 48" width="20" height="20" aria-hidden="true">
-    <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z" />
-    <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z" />
-    <path fill="#FBBC05" d="M10.5 28.7a14.5 14.5 0 0 1 0-9.4l-7.9-6.1a24 24 0 0 0 0 21.6l7.9-6.1z" />
-    <path fill="#34A853" d="M24 48c6.5 0 12-2.1 16-5.8l-7.6-5.9c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z" />
-  </svg>
 );
 const Logo = ({ size = 40 }: { size?: number }) => (
   <svg viewBox="0 0 48 48" width={size} height={size} aria-hidden="true">
@@ -246,12 +275,13 @@ function Field({ id, label, type = "text", placeholder, value, onChange, icon, e
   );
 }
 
-/* ───────────── page ───────────── */
-export default function SignIn() {
+/* ───────────── inner form (needs GoogleOAuthProvider above it) ───────────── */
+function SignInForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
 
   const handleSubmit = async (ev: FormEvent) => {
     ev.preventDefault();
@@ -261,12 +291,37 @@ export default function SignIn() {
 
     setLoading(true);
     try {
-      await signInRequest({ email: email.trim(), password });
+      const { accessToken } = await signInRequest({ email: email.trim(), password });
+      // store however you manage auth state — sessionStorage/context/etc.
+      sessionStorage.setItem("accessToken", accessToken);
       window.location.assign(REDIRECT_AFTER_SIGNIN); // or useNavigate() from react-router
     } catch (err) {
       setErrors({ form: err instanceof Error ? err.message : "Something went wrong." });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Your backend verifies a Google ID token via OAuth2Client.verifyIdToken,
+  // so we need Google's ID-token flow. The GoogleLogin component provides
+  // that as `credential` (a JWT), unlike useGoogleLogin's default implicit
+  // flow which only returns an OAuth access token.
+  const handleGoogleSuccess = async (credentialResponse: CredentialResponse) => {
+    setErrors({});
+    const idToken = credentialResponse.credential;
+    if (!idToken) {
+      setErrors({ form: "Google sign-in failed. Please try again." });
+      return;
+    }
+    setGoogleLoading(true);
+    try {
+      const { accessToken } = await googleAuthRequest(idToken);
+      sessionStorage.setItem("accessToken", accessToken);
+      window.location.assign(REDIRECT_AFTER_SIGNIN);
+    } catch (err) {
+      setErrors({ form: err instanceof Error ? err.message : "Something went wrong." });
+    } finally {
+      setGoogleLoading(false);
     }
   };
 
@@ -307,9 +362,17 @@ export default function SignIn() {
 
           <div className="sw-divider"><span>or</span></div>
 
-          <a className="sw-btn sw-btn--ghost" href={GOOGLE_AUTH_URL}>
-            <GoogleIcon /> Continue with Google
-          </a>
+          <div className="sw-google-wrap">
+            <GoogleLogin
+              onSuccess={handleGoogleSuccess}
+              onError={() => setErrors({ form: "Google sign-in failed. Please try again." })}
+              theme="outline"
+              shape="pill"
+              width="100%"
+              text="signin_with"
+            />
+            {googleLoading && <p className="sw-google-loading">Connecting…</p>}
+          </div>
 
           <p className="sw-foot">
             Don't have an account? <a href={SIGN_UP_PATH}>Sign up</a>
@@ -317,5 +380,18 @@ export default function SignIn() {
         </section>
       </main>
     </div>
+  );
+}
+
+/* ───────────── page (exported) ───────────── */
+// GoogleLogin only works inside a GoogleOAuthProvider — same requirement as
+// the Sign Up page. If you already wrap your whole app with
+// GoogleOAuthProvider higher up (e.g. in main.tsx / App.tsx), you can drop
+// this wrapper here and just export SignInForm directly instead.
+export default function SignIn() {
+  return (
+    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+      <SignInForm />
+    </GoogleOAuthProvider>
   );
 }

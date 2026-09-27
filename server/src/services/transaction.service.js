@@ -16,7 +16,8 @@ async function assertCardOwnership(cardId, userId) {
   if (!cardId) return;
   const card = await prisma.card.findUnique({ where: { id: cardId } });
   if (!card) throw new AppError("Card not found", 404);
-  if (card.userId !== userId) throw new AppError("Card does not belong to this user", 403);
+  if (card.userId !== userId)
+    throw new AppError("Card does not belong to this user", 403);
 }
 
 /**
@@ -49,7 +50,8 @@ export async function getTransactions(userId, filters, pagination) {
 export async function getTransactionById(userId, id) {
   const transaction = await transactionRepository.findById(id);
   if (!transaction) throw new AppError("Transaction not found", 404);
-  if (transaction.userId !== userId) throw new AppError("You do not have access to this transaction", 403);
+  if (transaction.userId !== userId)
+    throw new AppError("You do not have access to this transaction", 403);
   return transaction;
 }
 
@@ -70,10 +72,13 @@ export async function createTransaction(userId, data) {
 export async function updateTransaction(userId, id, data) {
   const existing = await transactionRepository.findById(id);
   if (!existing) throw new AppError("Transaction not found", 404);
-  if (existing.userId !== userId) throw new AppError("You do not have access to this transaction", 403);
+  if (existing.userId !== userId)
+    throw new AppError("You do not have access to this transaction", 403);
 
-  if (data.card_id !== undefined) await assertCardOwnership(data.card_id, userId);
-  if (data.category_id !== undefined) await assertCategoryOwnership(data.category_id, userId);
+  if (data.card_id !== undefined)
+    await assertCardOwnership(data.card_id, userId);
+  if (data.category_id !== undefined)
+    await assertCategoryOwnership(data.category_id, userId);
 
   // Same follow-up as createTransaction: no card balance adjustment here,
   // even if type/amount/card_id changes.
@@ -83,7 +88,8 @@ export async function updateTransaction(userId, id, data) {
 export async function deleteTransaction(userId, id) {
   const existing = await transactionRepository.findById(id);
   if (!existing) throw new AppError("Transaction not found", 404);
-  if (existing.userId !== userId) throw new AppError("You do not have access to this transaction", 403);
+  if (existing.userId !== userId)
+    throw new AppError("You do not have access to this transaction", 403);
 
   await transactionRepository.deleteTransaction(id);
 }

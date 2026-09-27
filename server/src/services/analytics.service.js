@@ -95,8 +95,8 @@ export async function getSpendingRadar(userId) {
     const category = categoryId ? categoryById.get(categoryId) : null;
     return {
       category_id: categoryId,
-      category: category?.name ?? "Uncategorized",
-      thisMonth: roundCurrency(thisMonthByCategory.get(categoryId) ?? 0),
+      name: category?.name ?? "Uncategorized",
+      this_period: roundCurrency(thisMonthByCategory.get(categoryId) ?? 0),
       average: roundCurrency(averageByCategory.get(categoryId) ?? 0),
     };
   });

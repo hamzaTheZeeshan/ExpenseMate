@@ -138,3 +138,38 @@ export async function sumByTypeForUser(userId, filters = {}) {
     _sum: { amount: true },
   });
 }
+
+
+/**
+ * Sums expense-type transaction amounts for a single user + category,
+ * where occurred_at falls within [startDate, endDate] inclusive of start,
+ * exclusive of end (so back-to-back budget periods don't double-count the
+ * boundary instant). Used by budget.service.js to compute progress.
+ *
+ * @param {string} userId
+ * @param {string} categoryId
+ * @param {Date} startDate
+ * @param {Date} endDate
+ * @returns {Promise<number>} total spent, as a plain number (0 if none)
+ */
+export async function sumExpensesForCategoryInRange(
+  userId,
+  categoryId,
+  startDate,
+  endDate,
+) {
+  const result = await prisma.transaction.aggregate({
+    where: {
+      userId,
+      categoryId,
+      type: "expense",
+      occurredAt: {
+        gte: startDate,
+        lt: endDate,
+      },
+    },
+    _sum: { amount: true },
+  });
+
+  return Number(result._sum.amount ?? 0);
+}

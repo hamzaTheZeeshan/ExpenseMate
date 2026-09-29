@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 // NOTE: adjust this path to wherever your Assets.ts actually lives relative to this file.
-import { promo } from "../Auth/Assets";
+import { promo } from "./Assets.promo";
 
 /* ──────────────────────────────────────────────────────────────────────
    CONFIG
@@ -173,6 +173,96 @@ function endOfToday(): Date {
   const d = new Date();
   d.setHours(23, 59, 59, 999);
   return d;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   CARD SOUNDS
+   Synthesised with the Web Audio API, so there's no audio file to ship.
+   "lift" = a short paper-swish as the front card slides out;
+   "drop" = a soft tap as the next card lands in front.
+   Only ever called from a click/keypress (or right after one), so browser
+   autoplay rules are satisfied. Every call is wrapped in try/catch so a
+   browser without Web Audio simply stays silent.
+   ────────────────────────────────────────────────────────────────────── */
+let audioCtx: AudioContext | null = null;
+let soundEnabled = true;
+
+function setSoundEnabled(on: boolean) {
+  soundEnabled = on;
+}
+
+function noiseBuffer(ctx: AudioContext, seconds: number): AudioBuffer {
+  const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * seconds)), ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / data.length); // fades out
+  }
+  return buf;
+}
+
+function playCardSound(kind: "lift" | "drop") {
+  if (!soundEnabled) return;
+  try {
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    if (!audioCtx) audioCtx = new Ctx();
+    const ctx = audioCtx;
+    if (ctx.state === "suspended") void ctx.resume();
+    const now = ctx.currentTime;
+
+    if (kind === "lift") {
+      // swish: band-passed noise sweeping upward
+      const dur = 0.22;
+      const src = ctx.createBufferSource();
+      src.buffer = noiseBuffer(ctx, dur);
+      const filter = ctx.createBiquadFilter();
+      filter.type = "bandpass";
+      filter.Q.value = 0.9;
+      filter.frequency.setValueAtTime(1200, now);
+      filter.frequency.exponentialRampToValueAtTime(5200, now + dur);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.32, now + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      src.start(now);
+      src.stop(now + dur);
+    } else {
+      // tap: a tiny high-passed noise click plus a short low thump
+      const dur = 0.09;
+      const src = ctx.createBufferSource();
+      src.buffer = noiseBuffer(ctx, dur);
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 1800;
+      const clickGain = ctx.createGain();
+      clickGain.gain.setValueAtTime(0.28, now);
+      clickGain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      src.connect(hp);
+      hp.connect(clickGain);
+      clickGain.connect(ctx.destination);
+      src.start(now);
+      src.stop(now + dur);
+
+      const osc = ctx.createOscillator();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(190, now);
+      osc.frequency.exponentialRampToValueAtTime(80, now + 0.1);
+      const thump = ctx.createGain();
+      thump.gain.setValueAtTime(0.22, now);
+      thump.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+      osc.connect(thump);
+      thump.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.12);
+    }
+  } catch {
+    /* audio unavailable — stay silent */
+  }
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -382,17 +472,29 @@ const styles = `
 .db-account-menu__item:hover { background: var(--bg); }
 .db-account-menu__item.danger { color: var(--danger); }
 
-/* ── grid: explicit column groups so Promo can span both rows ── */
+/* ── grid: top row = Transactions | Spending, bottom row = Card | Budget, Promo spans both ── */
 .db-grid {
   display: grid;
   grid-template-columns: 1.15fr 1.25fr 0.82fr;
-  grid-template-rows: auto auto;
+  grid-template-areas:
+    "tx     spend  promo"
+    "bottom bottom promo";
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
-.db-grid__col1 { display: flex; flex-direction: column; gap: 16px; }
-.db-grid__col2 { display: flex; flex-direction: column; gap: 16px; }
-.db-grid__promo { grid-row: 1 / span 2; align-self: start; }
+.db-grid__tx     { grid-area: tx;     display: flex; flex-direction: column; min-width: 0; }
+.db-grid__spend  { grid-area: spend;  display: flex; flex-direction: column; min-width: 0; }
+.db-grid__promo  { grid-area: promo;  align-self: start; }
+
+/* bottom row: card island hugs the card (fixed width → fixed aspect ratio),
+   budget island takes all remaining space */
+.db-grid__bottom { grid-area: bottom; display: flex; gap: 16px; align-items: stretch; min-width: 0; }
+.db-bottom__card {
+  flex: 0 0 340px;        /* card width = 340 − 24px padding → ~316 × 199 (1.586:1) */
+  display: flex; flex-direction: column;
+  align-self: flex-start; /* island is only as tall as the card + footer */
+}
+.db-bottom__budget { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
 
 .db-card {
   background: var(--panel);
@@ -402,6 +504,8 @@ const styles = `
   transition: height 0.45s cubic-bezier(0.32, 0.08, 0.24, 1);
 }
 .db-card__inner { padding: 22px; }
+.db-card__inner--tight { padding: 12px; }
+.db-card--grow { flex: 1 1 auto; }
 /* new rows ease in instead of popping */
 @keyframes db-row-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 .db-tx-list .db-tx { animation: db-row-in 0.4s ease both; }
@@ -457,19 +561,28 @@ const styles = `
 /* ── credit card widget ── */
 /* stacked cards: every card is absolutely positioned; --pos (0 = front)
    drives its offset/scale, so switching cards is just a transition. */
-.db-card-stack { position: relative; margin-bottom: 18px; }
-.db-stack { position: relative; transition: height 0.45s cubic-bezier(0.32, 0.08, 0.24, 1); }
+.db-card-stack { position: relative; }
+.db-stack {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1.586 / 1; /* real credit-card proportions */
+  /* room below for the cards peeking out from behind (--peek = 0…2 layers) */
+  margin: 0 auto calc(var(--peek, 0) * 12px);
+  transition: margin-bottom 0.45s cubic-bezier(0.32, 0.08, 0.24, 1);
+}
 .db-stack--clickable { cursor: pointer; }
 .db-stack:focus-visible { outline: 2px solid var(--lime-deep); outline-offset: 6px; border-radius: 20px; }
 .db-visual-card {
   position: absolute; top: 0; left: 0; right: 0;
-  height: 150px;
-  padding: 18px 20px 16px;
+  height: 100%;
+  display: flex; flex-direction: column;
+  padding: 22px 24px 54px; /* bottom padding leaves room for the footer row */
   border-radius: 20px;
   background: var(--lime);
   color: var(--ink);
   transform-origin: top center;
-  transform: translateY(calc(var(--pos, 0) * 18px)) scale(calc(1 - var(--pos, 0) * 0.04));
+  /* each layer behind sticks out ~12px regardless of card height (the % is of the card's own height) */
+  transform: translateY(calc(var(--pos, 0) * (12px + 4%))) scale(calc(1 - var(--pos, 0) * 0.04));
   transition: transform 0.5s cubic-bezier(0.32, 0.08, 0.24, 1), opacity 0.3s ease, box-shadow 0.3s ease;
   box-shadow: 0 8px 20px rgba(10,10,10,0.10);
   user-select: none;
@@ -484,17 +597,19 @@ const styles = `
 .db-visual-card--v1 { background: var(--ink); color: #fff; }
 .db-visual-card--v2 { background: #cfd9bd; }
 .db-visual-card--v3 { background: #4d5c3a; color: #fff; }
-.db-visual-card__chip { position: absolute; top: 16px; right: 20px; opacity: 0.55; }
-.db-visual-card__name { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
-.db-visual-card__balance { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
-.db-visual-card__balance small { font-size: 15px; font-weight: 700; }
-.db-visual-card__foot { position: absolute; left: 20px; right: 20px; bottom: 16px; display: flex; align-items: flex-end; justify-content: space-between; font-size: 13px; font-weight: 600; letter-spacing: 0.03em; }
-.db-stack-hint { font-size: 12px; color: var(--muted); text-align: center; margin: 14px 0 0; }
-
-.db-card-meta { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
-.db-card-meta__row { display: flex; align-items: center; justify-content: space-between; font-size: 13.5px; }
-.db-card-meta__label { color: var(--muted); }
-.db-card-meta__value { font-weight: 600; }
+.db-visual-card__chip { position: absolute; top: 20px; right: 24px; opacity: 0.55; }
+.db-visual-card__name { font-size: 16px; font-weight: 700; margin: 0; }
+.db-visual-card__balance { font-size: 32px; font-weight: 800; letter-spacing: -0.02em; margin: auto 0; }
+.db-visual-card__balance small { font-size: 17px; font-weight: 700; }
+.db-visual-card__foot { position: absolute; left: 24px; right: 24px; bottom: 20px; display: flex; align-items: flex-end; justify-content: space-between; font-size: 13px; font-weight: 600; letter-spacing: 0.03em; }
+.db-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 0 4px 2px; }
+.db-card-foot__text { font-size: 13px; color: var(--muted); }
+.db-card-foot__text strong { color: var(--ink); font-weight: 700; }
+.db-card-foot__right { display: flex; align-items: center; gap: 12px; }
+.db-dots { display: flex; align-items: center; gap: 5px; }
+.db-dots__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line); transition: background 0.3s ease, width 0.3s ease; }
+.db-dots__dot.is-active { width: 16px; border-radius: 999px; background: var(--ink); }
+.db-icon-btn--sm { width: 32px; height: 32px; }
 
 .db-add-card-btn {
   width: 100%; height: 46px; border-radius: 999px; border: 0;
@@ -514,7 +629,29 @@ const styles = `
 .db-budget-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .db-tooltip-bubble { fill: var(--ink); }
 .db-tooltip-text { fill: #fff; font-size: 12px; font-weight: 700; font-family: inherit; }
-.db-axis-label { font-size: 11px; fill: var(--muted); font-family: inherit; }
+.db-axis-label { font-size: 11px; fill: var(--muted); font-family: inherit; transition: fill 0.2s ease; }
+.db-axis-label.is-active { fill: var(--ink); font-weight: 700; }
+.db-budget-stat { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 10px; }
+.db-budget-stat__label { width: 100%; font-size: 12px; color: var(--muted); margin: 0; }
+.db-budget-stat__value { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; margin: 0; font-variant-numeric: tabular-nums; }
+.db-budget-delta {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+.db-budget-delta.up { background: #fdecea; color: var(--danger); }
+.db-budget-delta.down { background: #eaf6d3; color: #4f7a0c; }
+.db-budget-svg { display: block; width: 100%; height: auto; cursor: crosshair; touch-action: pan-y; outline: none; border-radius: 12px; }
+.db-budget-svg:focus-visible { outline: 2px solid var(--lime-deep); outline-offset: 2px; }
+.db-budget-line { transition: stroke-dashoffset 1.3s cubic-bezier(0.3, 0.7, 0.2, 1); }
+.db-budget-area { transition: opacity 0.9s ease 0.5s; }
+.db-budget-dot {
+  transform-box: fill-box; transform-origin: center;
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
+}
+.db-budget-move { transition: transform 0.22s cubic-bezier(0.32, 0.08, 0.24, 1), opacity 0.4s ease; }
+.db-budget-pulse { transform-box: fill-box; transform-origin: center; animation: db-pulse 1.8s ease-out infinite; }
+@keyframes db-pulse { from { transform: scale(1); opacity: 0.55; } to { transform: scale(2.8); opacity: 0; } }
 
 /* ── promo card: image-based ad that flips to reveal the plan on its back ── */
 .db-promo {
@@ -567,6 +704,8 @@ const styles = `
   .db-promo__inner { transition-duration: 0.01s; }
   .db-card, .db-stack { transition-duration: 0.01s; }
   .db-tx-list .db-tx { animation: none; }
+  .db-budget-line, .db-budget-area, .db-budget-dot, .db-budget-move { transition-duration: 0.01s !important; transition-delay: 0s !important; }
+  .db-budget-pulse { animation: none; }
 }
 
 /* ── page-level loading/error ── */
@@ -626,13 +765,23 @@ const styles = `
 .db-modal-loading, .db-modal-empty { font-size: 13.5px; color: var(--muted); padding: 20px 0; text-align: center; }
 
 @media (max-width: 1100px) {
-  .db-grid { grid-template-columns: 1fr 1fr; }
-  .db-grid__promo { grid-row: auto; }
+  .db-grid {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "tx     spend"
+      "bottom bottom"
+      "promo  promo";
+  }
+  .db-grid__promo { align-self: stretch; }
 }
 @media (max-width: 760px) {
   .db-page { flex-direction: column; }
-  .db-grid { grid-template-columns: 1fr; }
-  .db-grid__promo { grid-row: auto; }
+  .db-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas: "tx" "spend" "bottom" "promo";
+  }
+  .db-grid__bottom { flex-direction: column; }
+  .db-bottom__card { flex: 0 0 auto; width: 100%; max-width: 420px; align-self: center; }
 }
 `;
 
@@ -651,6 +800,8 @@ const ArrowRight = () => <Svg size={13}><path d="m9 6 6 6-6 6" /></Svg>;
 const PlusIcon = () => <Svg size={16}><path d="M12 5v14M5 12h14" /></Svg>;
 const CloseIcon = () => <Svg size={16}><path d="M6 6l12 12M18 6L6 18" /></Svg>;
 const UserIcon = () => <Svg size={16}><circle cx="12" cy="7.5" r="3.5" /><path d="M4.5 19.2a7.5 7.5 0 0 1 15 0" /></Svg>;
+const SpeakerIcon = () => <Svg size={16}><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M18.5 5.5a9 9 0 0 1 0 13" /></Svg>;
+const SpeakerOffIcon = () => <Svg size={16}><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="m16 9 5 6M21 9l-5 6" /></Svg>;
 const LogoutIcon = () => <Svg size={16}><path d="M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3" /><path d="M15 16l4-4-4-4" /><path d="M19 12H9" /></Svg>;
 
 const BADGE_COLORS: Record<Transaction["badge"], string> = {
@@ -1201,7 +1352,15 @@ function AllTransactionsModal({
    a card is added, Month/Week/Day is toggled, data finishes loading) the
    card eases to its new height instead of snapping. (`height: auto` can't
    be transitioned, which is why this is done in JS.) */
-function Island({ children }: { children: ReactNode }) {
+function Island({
+  children,
+  grow = false,
+  tight = false,
+}: {
+  children: ReactNode;
+  grow?: boolean; // stretch to fill leftover column height (keeps columns aligned)
+  tight?: boolean; // hug the content with minimal padding
+}) {
   const innerRef = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState<number | null>(null);
 
@@ -1217,8 +1376,11 @@ function Island({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <div className="db-card" style={height === null ? undefined : { height: height + 2 }}>
-      <div className="db-card__inner" ref={innerRef}>
+    <div
+      className={`db-card ${grow ? "db-card--grow" : ""}`}
+      style={height === null ? undefined : { height: height + 2 }}
+    >
+      <div className={`db-card__inner ${tight ? "db-card__inner--tight" : ""}`} ref={innerRef}>
         {children}
       </div>
     </div>
@@ -1241,7 +1403,7 @@ function TransactionsCard({
   onAddTransaction: () => void;
 }) {
   return (
-    <Island>
+    <Island grow>
       <div className="db-card__head">
         <div>
           <h3 className="db-card__title">Recent transactions</h3>
@@ -1552,7 +1714,7 @@ function SpendingCard({ refreshKey }: { refreshKey: number }) {
   const loading = !error && (!result || result.range !== range);
 
   return (
-    <Island>
+    <Island grow>
       <div className="db-card__head">
         <h3 className="db-card__title">Spending</h3>
         <div className="db-toggle-row db-toggle-row--sm">
@@ -1607,6 +1769,7 @@ function CreditCardWidget({
   onAddCard: () => void;
 }) {
   const [leavingId, setLeavingId] = useState<string | null>(null);
+  const [soundOn, setSoundOn] = useState(true);
   const timer = useRef<number | null>(null);
 
   useEffect(
@@ -1634,6 +1797,7 @@ function CreditCardWidget({
 
   function cycle() {
     if (!canCycle || leavingId) return;
+    playCardSound("lift");
     setLeavingId(front.id);
     timer.current = window.setTimeout(() => {
       onCycle();
@@ -1643,11 +1807,11 @@ function CreditCardWidget({
   }
 
   return (
-    <Island>
+    <Island tight>
       <div className="db-card-stack">
         <div
           className={`db-stack ${canCycle ? "db-stack--clickable" : ""}`}
-          style={{ height: 150 + Math.min(n - 1, 2) * 12 }}
+          style={{ "--peek": Math.min(n - 1, 2) } as CSSProperties}
           onClick={cycle}
           onKeyDown={(e) => {
             if (canCycle && (e.key === "Enter" || e.key === " ")) {
@@ -1681,8 +1845,8 @@ function CreditCardWidget({
                 <svg
                   className="db-visual-card__chip"
                   viewBox="0 0 40 30"
-                  width="40"
-                  height="30"
+                  width="46"
+                  height="34"
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="1.5"
@@ -1705,39 +1869,90 @@ function CreditCardWidget({
             );
           })}
         </div>
-        {canCycle && (
-          <p className="db-stack-hint">Card {frontNumber} of {n} · tap to switch</p>
-        )}
       </div>
-      <div className="db-card-meta">
-        <div className="db-card-meta__row">
-          <span className="db-card-meta__label">Credit used</span>
-          <span className="db-card-meta__value">${front.creditUsed.toFixed(2)}</span>
-        </div>
-        <div className="db-card-meta__row">
-          <span className="db-card-meta__label">Currency</span>
-          <span className="db-card-meta__value">{front.currency}</span>
+      <div className="db-card-foot">
+        <span className="db-card-foot__text">
+          Used <strong>${front.creditUsed.toFixed(2)}</strong> · {front.currency}
+        </span>
+        <div className="db-card-foot__right">
+          {canCycle && (
+            <div className="db-dots" aria-hidden="true">
+              {cards.map((c) => (
+                <span key={c.id} className={`db-dots__dot ${c.id === front.id ? "is-active" : ""}`} />
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            className="db-icon-btn db-icon-btn--sm"
+            onClick={() => {
+              const next = !soundOn;
+              setSoundOn(next);
+              setSoundEnabled(next);
+            }}
+            aria-label={soundOn ? "Mute card sounds" : "Unmute card sounds"}
+            aria-pressed={!soundOn}
+          >
+            {soundOn ? <SpeakerIcon /> : <SpeakerOffIcon />}
+          </button>
+          <button
+            type="button"
+            className="db-icon-btn db-icon-btn--sm"
+            onClick={onAddCard}
+            aria-label="Add new card"
+          >
+            <PlusIcon />
+          </button>
         </div>
       </div>
-      <button type="button" className="db-add-card-btn" onClick={onAddCard}>
-        <PlusIcon /> Add new card
-      </button>
     </Island>
   );
 }
 
+/* Tweens a displayed number toward `target` (ease-out), so the big figure
+   in the Budget header counts up/down as you move across the chart. */
+function useAnimatedNumber(target: number, duration = 450) {
+  const [val, setVal] = useState(target);
+  const fromRef = useRef(target);
+
+  useEffect(() => {
+    const from = fromRef.current;
+    const start = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const v = from + (target - from) * eased;
+      fromRef.current = v;
+      setVal(v);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+
+  return val;
+}
+
+/* Interactive spending-over-time chart.
+   - On load: the line draws itself, the area fades in, points pop in one by one.
+   - Hover / touch-drag: a crosshair + marker glide to the nearest point, the
+     tooltip follows, and the header figure counts to that week's spend with
+     its change vs the week before.
+   - Keyboard: focus the chart, then ← / → to step through weeks, Esc to reset. */
 function BudgetCard({ points }: { points: BudgetPoint[] }) {
   const width = 560;
-  const height = 240;
+  const height = 300;
   const padL = 30;
+  const padR = 12;
   const padB = 26;
   const padT = 12;
-  const chartW = width - padL - 12;
+  const chartW = width - padL - padR;
   const chartH = height - padB - padT;
+  const baseY = padT + chartH;
 
   // Dynamic ceiling instead of a hardcoded 7000, since real spend data
-  // has no fixed range. Ticks stay evenly spaced at 1/7th of the max,
-  // same visual rhythm as before.
+  // has no fixed range. Ticks stay evenly spaced at 1/7th of the max.
   const max = Math.max(1000, ...points.map((p) => p.value), 1);
   const yTicks = useMemo(
     () => Array.from({ length: 8 }, (_, i) => Math.round((max / 7) * i)),
@@ -1754,9 +1969,36 @@ function BudgetCard({ points }: { points: BudgetPoint[] }) {
     [points, max],
   );
 
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
+  const [drawn, setDrawn] = useState(false); // line/area draw-in has started
+  const [intro, setIntro] = useState(true); // true until the draw-in has finished
+
+  // (Re)play the intro whenever the data changes.
+  useEffect(() => {
+    setDrawn(false);
+    setIntro(true);
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setDrawn(true));
+    });
+    const t = window.setTimeout(() => setIntro(false), 1500);
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+      window.clearTimeout(t);
+    };
+  }, [points]);
+
+  const lastIdx = points.length - 1;
+  const shownIdx = activeIdx !== null && activeIdx <= lastIdx ? activeIdx : lastIdx;
+  const shownPoint = points[shownIdx];
+  const prevPoint = shownIdx > 0 ? points[shownIdx - 1] : null;
+  const animatedValue = useAnimatedNumber(shownPoint ? shownPoint.value : 0);
+
   if (points.length === 0) {
     return (
-      <Island>
+      <Island grow>
         <div className="db-budget-head">
           <h3 className="db-card__title">Budget</h3>
         </div>
@@ -1765,42 +2007,196 @@ function BudgetCard({ points }: { points: BudgetPoint[] }) {
     );
   }
 
-  const highlightIndex = Math.min(3, coords.length - 1);
-  const highlight = coords[highlightIndex];
-  const path = smoothPath(coords);
+  const delta =
+    prevPoint && prevPoint.value > 0
+      ? ((shownPoint.value - prevPoint.value) / prevPoint.value) * 100
+      : null;
+
+  const highlight = coords[shownIdx];
+  const linePath = smoothPath(coords);
+  const areaPath =
+    coords.length > 1
+      ? `${linePath} L ${coords[coords.length - 1].x},${baseY} L ${coords[0].x},${baseY} Z`
+      : "";
+
+  const tipW = 96;
+  const tipH = 28;
+  const tipX = Math.min(Math.max(highlight.x - tipW / 2, padL), width - padR - tipW);
+  const tipY = highlight.y - 42 < 0 ? highlight.y + 14 : highlight.y - 42;
+
+  function indexFromClientX(clientX: number): number | null {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (rect.width === 0) return null;
+    const x = ((clientX - rect.left) / rect.width) * width;
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < coords.length; i++) {
+      const d = Math.abs(coords[i].x - x);
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  function handlePointer(e: React.PointerEvent<SVGSVGElement>) {
+    const idx = indexFromClientX(e.clientX);
+    if (idx !== null) setActiveIdx(idx);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<SVGSVGElement>) {
+    const current = activeIdx ?? lastIdx;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setActiveIdx(Math.max(0, current - 1));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setActiveIdx(Math.min(lastIdx, current + 1));
+    } else if (e.key === "Escape") {
+      setActiveIdx(null);
+    }
+  }
 
   return (
-    <Island>
+    <Island grow>
       <div className="db-budget-head">
         <h3 className="db-card__title">Budget</h3>
-        <button className="db-pill-select" type="button">Month <ChevronDown /></button>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="auto" role="img" aria-label="Budget over time">
+
+      <div className="db-budget-stat">
+        <p className="db-budget-stat__label">
+          {activeIdx === null ? `Latest · week of ${shownPoint.label}` : `Week of ${shownPoint.label}`}
+        </p>
+        <p className="db-budget-stat__value">{usd(animatedValue)}</p>
+        {delta !== null && (
+          <span className={`db-budget-delta ${delta >= 0 ? "up" : "down"}`}>
+            {delta >= 0 ? "▲" : "▼"} {Math.abs(delta).toFixed(1)}% vs previous week
+          </span>
+        )}
+      </div>
+
+      <svg
+        ref={svgRef}
+        className="db-budget-svg"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Spending over time. Use the left and right arrow keys to step through weeks."
+        tabIndex={0}
+        onPointerMove={handlePointer}
+        onPointerDown={handlePointer}
+        onPointerLeave={() => setActiveIdx(null)}
+        onKeyDown={handleKeyDown}
+        onBlur={() => setActiveIdx(null)}
+      >
+        <defs>
+          <linearGradient id="db-budget-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#c6ee4a" stopOpacity="0.55" />
+            <stop offset="100%" stopColor="#c6ee4a" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+
         {yTicks.map((t) => {
           const y = padT + chartH - (t / max) * chartH;
           return (
             <g key={t}>
-              <line x1={padL} y1={y} x2={width - 12} y2={y} stroke="var(--line)" strokeDasharray="3 4" />
-              <text x={4} y={y + 4} className="db-axis-label">{t === 0 ? "0" : `${Math.round(t / 1000)}k`}</text>
+              <line x1={padL} y1={y} x2={width - padR} y2={y} stroke="var(--line)" strokeDasharray="3 4" />
+              <text x={4} y={y + 4} className="db-axis-label">
+                {t >= 1000 ? `${+(t / 1000).toFixed(1)}k` : t}
+              </text>
             </g>
           );
         })}
-        <path d={path} fill="none" stroke="var(--ink)" strokeWidth={2} />
-        {coords.map((c) => (
-          <text key={c.label} x={c.x} y={height - 4} textAnchor="middle" className="db-axis-label">{c.label}</text>
-        ))}
-        {highlight && (
-          <g>
-            <line x1={highlight.x} y1={padT} x2={highlight.x} y2={chartH + padT} stroke="var(--line)" />
-            <circle cx={highlight.x} cy={highlight.y} r={5} fill="var(--lime)" stroke="var(--ink)" strokeWidth={1.5} />
-            <g transform={`translate(${highlight.x - 46}, ${highlight.y - 42})`}>
-              <rect className="db-tooltip-bubble" width={92} height={28} rx={14} />
-              <text x={46} y={19} textAnchor="middle" className="db-tooltip-text">
-                ${highlight.value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-              </text>
-            </g>
-          </g>
+
+        {areaPath && (
+          <path
+            className="db-budget-area"
+            d={areaPath}
+            fill="url(#db-budget-fill)"
+            style={{ opacity: drawn ? 1 : 0 }}
+          />
         )}
+
+        {linePath && (
+          <path
+            className="db-budget-line"
+            d={linePath}
+            pathLength={1}
+            fill="none"
+            stroke="var(--ink)"
+            strokeWidth={2.25}
+            strokeLinejoin="round"
+            strokeDasharray={1}
+            strokeDashoffset={drawn ? 0 : 1}
+          />
+        )}
+
+        {coords.map((c, i) => (
+          <circle
+            key={c.label + i}
+            className="db-budget-dot"
+            cx={c.x}
+            cy={c.y}
+            r={3.5}
+            fill="#fff"
+            stroke="var(--ink)"
+            strokeWidth={1.5}
+            style={{
+              opacity: drawn && i !== shownIdx ? 1 : 0,
+              transform: drawn && i !== shownIdx ? "scale(1)" : "scale(0)",
+              transitionDelay: intro ? `${0.45 + i * 0.07}s` : "0s",
+            }}
+          />
+        ))}
+
+        {coords.map((c, i) => (
+          <text
+            key={`x-${c.label}-${i}`}
+            x={c.x}
+            y={height - 4}
+            textAnchor="middle"
+            className={`db-axis-label ${i === shownIdx ? "is-active" : ""}`}
+          >
+            {c.label}
+          </text>
+        ))}
+
+        {/* crosshair: glides horizontally to the active week */}
+        <g
+          className="db-budget-move"
+          style={{ transform: `translate(${highlight.x}px, 0px)`, opacity: intro ? 0 : 1 }}
+        >
+          <line
+            x1={0}
+            y1={padT}
+            x2={0}
+            y2={baseY}
+            stroke={activeIdx !== null ? "var(--ink)" : "var(--line)"}
+            strokeDasharray="3 4"
+          />
+        </g>
+
+        {/* marker: glides to the active point, pulses while you hover */}
+        <g
+          className="db-budget-move"
+          style={{ transform: `translate(${highlight.x}px, ${highlight.y}px)`, opacity: intro ? 0 : 1 }}
+        >
+          {activeIdx !== null && <circle className="db-budget-pulse" r={6} fill="var(--lime)" />}
+          <circle r={6} fill="var(--lime)" stroke="var(--ink)" strokeWidth={1.75} />
+        </g>
+
+        {/* tooltip: follows the marker, clamped inside the chart */}
+        <g
+          className="db-budget-move"
+          style={{ transform: `translate(${tipX}px, ${tipY}px)`, opacity: intro ? 0 : 1, pointerEvents: "none" }}
+        >
+          <rect className="db-tooltip-bubble" width={tipW} height={tipH} rx={14} />
+          <text x={tipW / 2} y={19} textAnchor="middle" className="db-tooltip-text">
+            ${highlight.value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          </text>
+        </g>
       </svg>
     </Island>
   );
@@ -1978,6 +2374,17 @@ export default function Dashboard() {
   const recent = activeCardId ? recentByCard[activeCardId] : undefined;
   const recentLoading = !!activeCardId && recent === undefined && !recentError;
 
+  // "Card lands" tap whenever a different card comes to the front: cycling the
+  // stack, adding a card, or posting a transaction on another card. Skips the
+  // very first load so the page doesn't make noise on open.
+  const prevActiveCardId = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevActiveCardId.current && activeCardId && prevActiveCardId.current !== activeCardId) {
+      playCardSound("drop");
+    }
+    prevActiveCardId.current = activeCardId;
+  }, [activeCardId]);
+
   function handleCycleCards() {
     setCardOrder((o) => (o.length > 1 ? [...o.slice(1), o[0]] : o));
   }
@@ -2056,7 +2463,7 @@ export default function Dashboard() {
 
         {status === "ready" && data && (
           <div className="db-grid">
-            <div className="db-grid__col1">
+            <div className="db-grid__tx">
               <TransactionsCard
                 transactions={recent ?? []}
                 loading={recentLoading}
@@ -2065,17 +2472,24 @@ export default function Dashboard() {
                 onViewAll={() => setOpenModal("allTransactions")}
                 onAddTransaction={() => setOpenModal("addTransaction")}
               />
-              <CreditCardWidget
-                cards={data.cards}
-                order={cardOrder}
-                onCycle={handleCycleCards}
-                onAddCard={() => setOpenModal("addCard")}
-              />
             </div>
 
-            <div className="db-grid__col2">
+            <div className="db-grid__spend">
               <SpendingCard refreshKey={txVersion} />
-              <BudgetCard points={data.budget} />
+            </div>
+
+            <div className="db-grid__bottom">
+              <div className="db-bottom__card">
+                <CreditCardWidget
+                  cards={data.cards}
+                  order={cardOrder}
+                  onCycle={handleCycleCards}
+                  onAddCard={() => setOpenModal("addCard")}
+                />
+              </div>
+              <div className="db-bottom__budget">
+                <BudgetCard points={data.budget} />
+              </div>
             </div>
 
             <div className="db-grid__promo">

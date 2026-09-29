@@ -234,7 +234,6 @@ interface BudgetPoint {
 interface DashboardData {
   spending: SpendingCategory[];
   cards: CardSummary[]; // stable order (default first); the stack order lives in Dashboard state
-  summary: { income: number; expense: number }; // this month, from GET /dashboard → month_summary
   budget: BudgetPoint[];
   user: { name: string; initials: string; email: string };
 }
@@ -323,12 +322,7 @@ async function loadDashboardData(): Promise<DashboardData> {
     (email ? email.split("@")[0] : "Account");
   const user = { name: fullName, initials: initialsFromName(fullName), email };
 
-  const summary = {
-    income: toNumber(dashboard.month_summary?.income),
-    expense: toNumber(dashboard.month_summary?.expense),
-  };
-
-  return { spending, cards, summary, budget, user };
+  return { spending, cards, budget, user };
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -497,7 +491,13 @@ const styles = `
 .db-pie-legend__name { font-size: 13.5px; font-weight: 700; margin: 0; }
 .db-pie-legend__hint { font-size: 12px; color: var(--muted); margin: 2px 0 0; }
 .db-pie-legend__amount { font-size: 14px; font-weight: 700; white-space: nowrap; }
-.db-card__head .db-toggle-btn { padding: 0 14px; }
+/* pie section inside the Spending island, with its own period selector */
+.db-pie-section { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.db-pie-section__head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+.db-pie-section__title { font-size: 15px; font-weight: 700; margin: 0; }
+.db-toggle-row--sm { width: auto; }
+.db-toggle-row--sm .db-toggle-btn { height: 34px; padding: 0 12px; font-size: 13px; border-radius: 10px; }
+.db-pie-note { font-size: 11.5px; color: var(--muted); text-align: center; margin: 10px 0 0; }
 
 /* ── credit card widget ── */
 /* stacked cards: every card is absolutely positioned; --pos (0 = front)
@@ -1348,7 +1348,7 @@ function TransactionsCard({
    since the backend doesn't expose a separate weekly-vs-average dataset
    today — it's a relabeled view of the same numbers, not a real week
    slice. ── */
-type SpendingRange = "overview" | "month" | "week" | "day";
+type SpendingRange = "month" | "week" | "day";
 
 function HourlyBarChart({ hours }: { hours: number[] }) {
   const width = 560;
@@ -1411,12 +1411,44 @@ const usdCompact = (v: number) =>
   v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${Math.round(v).toLocaleString()}`;
 
 type PieKey = "expense" | "savings";
+type PieRange = "all" | "month" | "week" | "day";
 
-/* Donut: the whole ring is this month's income, split into what was spent
+const PIE_RANGES: { key: PieRange; label: string; short: string; phrase: string }[] = [
+  { key: "all", label: "All time", short: "all time", phrase: "across all time" },
+  { key: "month", label: "Month", short: "this month", phrase: "this month" },
+  { key: "week", label: "Week", short: "last 7 days", phrase: "over the last 7 days" },
+  { key: "day", label: "Day", short: "today", phrase: "today" },
+];
+
+// The transactions endpoint is fetched with the same page size the rest of
+// this file already uses; if a period hits it, the pie says it's partial.
+const PIE_FETCH_LIMIT = 200;
+
+// Day = today, Week = the last 7 days including today, Month = the calendar
+// month so far, All time = no date filter.
+function pieRangeBounds(range: PieRange): { start?: Date; end?: Date } {
+  if (range === "all") return {};
+  const start = startOfToday();
+  if (range === "week") start.setDate(start.getDate() - 6);
+  if (range === "month") start.setDate(1);
+  return { start, end: endOfToday() };
+}
+
+/* Donut: the whole ring is the period's income, split into what was spent
    and what was kept. Hover a slice (or its legend row) to read it in the
    centre. If expenses exceed income the ring is all expenses and a note
    says by how much. */
-function IncomePie({ income, expense }: { income: number; expense: number }) {
+function IncomePie({
+  income,
+  expense,
+  short,
+  phrase,
+}: {
+  income: number;
+  expense: number;
+  short: string;
+  phrase: string;
+}) {
   const [hover, setHover] = useState<PieKey | null>(null);
   const [ready, setReady] = useState(false);
 
@@ -1429,7 +1461,7 @@ function IncomePie({ income, expense }: { income: number; expense: number }) {
   const total = Math.max(income, expense);
 
   if (total <= 0) {
-    return <p className="db-empty-note">No income or expenses recorded this month yet.</p>;
+    return <p className="db-empty-note">No income or expenses recorded {phrase} yet.</p>;
   }
 
   const overspent = expense > income;
@@ -1466,7 +1498,7 @@ function IncomePie({ income, expense }: { income: number; expense: number }) {
     ? pctOfIncome(focus.value) !== null
       ? `${pctOfIncome(focus.value)}% of income`
       : "no income yet"
-    : "this month";
+    : short;
 
   const savedPct = pctOfIncome(savings);
 
@@ -1476,7 +1508,7 @@ function IncomePie({ income, expense }: { income: number; expense: number }) {
         className="db-pie"
         viewBox="0 0 200 200"
         role="img"
-        aria-label={`This month: income ${usd(income)}, expenses ${usd(expense)}, savings ${usd(savings)}.`}
+        aria-label={`${short}: income ${usd(income)}, expenses ${usd(expense)}, savings ${usd(savings)}.`}
       >
         <circle cx={c} cy={c} r={r} fill="none" stroke="var(--line)" strokeWidth={sw} opacity={0.6} />
         <g transform={`rotate(-90 ${c} ${c})`}>
@@ -1516,7 +1548,7 @@ function IncomePie({ income, expense }: { income: number; expense: number }) {
           />
           <div className="db-pie-legend__text">
             <p className="db-pie-legend__name">Income</p>
-            <p className="db-pie-legend__hint">Total earned this month</p>
+            <p className="db-pie-legend__hint">Total earned {phrase}</p>
           </div>
           <span className="db-pie-legend__amount">{usd(income)}</span>
         </li>
@@ -1548,23 +1580,111 @@ function IncomePie({ income, expense }: { income: number; expense: number }) {
 
       <p className="db-pie__insight">
         {overspent ? (
-          <>You spent <strong>{usd(expense - income)}</strong> more than you earned this month.</>
+          <>You spent <strong>{usd(expense - income)}</strong> more than you earned {phrase}.</>
         ) : income > 0 ? (
-          <>You kept <strong>{savedPct}%</strong> of your income this month — <strong>{usd(savings)}</strong> saved.</>
+          <>You kept <strong>{savedPct}%</strong> of your income {phrase} — <strong>{usd(savings)}</strong> saved.</>
         ) : null}
       </p>
     </div>
   );
 }
 
+/* The pie plus its own All time / Month / Week / Day selector. Totals are
+   summed client-side from the transactions in the chosen period. */
+function IncomeBreakdown({ refreshKey }: { refreshKey: number }) {
+  const [range, setRange] = useState<PieRange>("month");
+  const [result, setResult] = useState<{
+    range: PieRange;
+    income: number;
+    expense: number;
+    truncated: boolean;
+  } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+
+    async function run() {
+      try {
+        const { start, end } = pieRangeBounds(range);
+        const params = new URLSearchParams({ limit: String(PIE_FETCH_LIMIT) });
+        if (start && end) {
+          params.set("start_date", start.toISOString());
+          params.set("end_date", end.toISOString());
+        }
+        const res = await apiGet<{ transactions: RawTransaction[] }>(
+          `/transactions?${params.toString()}`,
+        );
+        if (cancelled) return;
+        let income = 0;
+        let expense = 0;
+        for (const tx of res.transactions) {
+          const amt = Math.abs(toNumber(tx.amount));
+          if (tx.type === "income") income += amt;
+          else expense += amt;
+        }
+        setResult({ range, income, expense, truncated: res.transactions.length >= PIE_FETCH_LIMIT });
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Couldn't load this period.");
+      }
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [range, refreshKey]);
+
+  const shown = result ? PIE_RANGES.find((r) => r.key === result.range)! : null;
+  const loading = !error && (!result || result.range !== range);
+
+  return (
+    <div className="db-pie-section">
+      <div className="db-pie-section__head">
+        <h4 className="db-pie-section__title">Income vs expenses</h4>
+        <div className="db-toggle-row db-toggle-row--sm">
+          {PIE_RANGES.map((r) => (
+            <button
+              key={r.key}
+              type="button"
+              className={`db-toggle-btn ${range === r.key ? "active" : ""}`}
+              onClick={() => setRange(r.key)}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {error && <div className="db-form-error">{error}</div>}
+      {!error && !result && <p className="db-empty-note">Loading…</p>}
+      {result && shown && (
+        <div style={{ opacity: loading ? 0.45 : 1, transition: "opacity 0.2s ease" }}>
+          <IncomePie
+            key={`${result.range}-${result.income}-${result.expense}`}
+            income={result.income}
+            expense={result.expense}
+            short={shown.short}
+            phrase={shown.phrase}
+          />
+          {result.truncated && (
+            <p className="db-pie-note">Based on your {PIE_FETCH_LIMIT} most recent transactions in this period.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SpendingCard({
   categories,
-  summary,
+  refreshKey,
 }: {
   categories: SpendingCategory[];
-  summary: { income: number; expense: number };
+  refreshKey: number;
 }) {
-  const [range, setRange] = useState<SpendingRange>("overview");
+  const [range, setRange] = useState<SpendingRange>("month");
   const [hourly, setHourly] = useState<number[] | null>(null);
   const [dayError, setDayError] = useState<string | null>(null);
   const [dayLoading, setDayLoading] = useState(false);
@@ -1600,7 +1720,7 @@ function SpendingCard({
     return () => {
       cancelled = true;
     };
-  }, [range]);
+  }, [range, refreshKey]);
 
   const size = 260;
   const cx = size / 2;
@@ -1616,14 +1736,14 @@ function SpendingCard({
       <div className="db-card__head">
         <h3 className="db-card__title">Spending</h3>
         <div className="db-toggle-row" style={{ width: "auto" }}>
-          {(["overview", "month", "week", "day"] as SpendingRange[]).map((r) => (
+          {(["month", "week", "day"] as SpendingRange[]).map((r) => (
             <button
               key={r}
               type="button"
               className={`db-toggle-btn ${range === r ? "active" : ""}`}
               onClick={() => setRange(r)}
             >
-              {r === "overview" ? "Overview" : r === "month" ? "Month" : r === "week" ? "Week" : "Day"}
+              {r === "month" ? "Month" : r === "week" ? "Week" : "Day"}
             </button>
           ))}
         </div>
@@ -1676,8 +1796,6 @@ function SpendingCard({
         </>
       )}
 
-      {range === "overview" && <IncomePie income={summary.income} expense={summary.expense} />}
-
       {range === "day" && (
         <>
           {dayLoading && <p className="db-empty-note">Loading today's spending…</p>}
@@ -1690,6 +1808,8 @@ function SpendingCard({
           )}
         </>
       )}
+
+      <IncomeBreakdown refreshKey={refreshKey} />
     </Island>
   );
 }
@@ -2005,6 +2125,8 @@ export default function Dashboard() {
   // Recent transactions per card id, fetched lazily when a card comes to the front.
   const [recentByCard, setRecentByCard] = useState<Record<string, Transaction[]>>({});
   const [recentError, setRecentError] = useState<string | null>(null);
+  // Bumped whenever a transaction is added, so the Spending charts refetch.
+  const [txVersion, setTxVersion] = useState(0);
 
   const [openModal, setOpenModal] = useState<OpenModal>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -2094,21 +2216,13 @@ export default function Dashboard() {
   function handleTransactionCreated(tx: Transaction, updatedCard: CardSummary | null, cardId: string) {
     // Use the card the backend returned inline — it's the real post-transaction
     // balance/creditUsed, not an estimate.
-    // Keep the income/expenses/savings donut in step with the new transaction.
-    setData((prev) =>
-      prev
-        ? {
-            ...prev,
-            cards: updatedCard
-              ? prev.cards.map((c) => (c.id === updatedCard.id ? updatedCard : c))
-              : prev.cards,
-            summary: {
-              income: prev.summary.income + (tx.amount > 0 ? tx.amount : 0),
-              expense: prev.summary.expense + (tx.amount < 0 ? -tx.amount : 0),
-            },
-          }
-        : prev,
-    );
+    if (updatedCard) {
+      setData((prev) =>
+        prev ? { ...prev, cards: prev.cards.map((c) => (c.id === updatedCard.id ? updatedCard : c)) } : prev,
+      );
+    }
+    // Tell the Spending island's transaction-based charts to refetch.
+    setTxVersion((v) => v + 1);
     // If that card's list is already loaded, prepend. If not, it will be
     // fetched (and already include this transaction) when it comes forward.
     setRecentByCard((prev) => (prev[cardId] ? { ...prev, [cardId]: [tx, ...prev[cardId]] } : prev));
@@ -2185,7 +2299,7 @@ export default function Dashboard() {
             </div>
 
             <div className="db-grid__col2">
-              <SpendingCard categories={data.spending} summary={data.summary} />
+              <SpendingCard categories={data.spending} refreshKey={txVersion} />
               <BudgetCard points={data.budget} />
             </div>
 

@@ -1644,11 +1644,6 @@ export default function Dashboard() {
         <header className="db-header">
           <h1 className="db-title">Dashboard</h1>
           <div className="db-header__right">
-            <button className="db-pill-select" type="button">Financial <ChevronDown /></button>
-            <button className="db-icon-btn" type="button" aria-label="Notifications">
-              <BellIcon /><span className="db-dot" />
-            </button>
-            <button className="db-icon-btn" type="button" aria-label="Messages"><InboxIcon /></button>
             <button
               className="db-user"
               type="button"

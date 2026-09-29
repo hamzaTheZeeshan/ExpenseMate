@@ -109,13 +109,6 @@ interface MeResponse {
   user?: { full_name?: string; name?: string; email?: string };
 }
 
-interface RadarRow {
-  category_id: string | null;
-  name: string;
-  this_period: number;
-  average: number;
-}
-
 interface SpendingOverTimeRow {
   period: string;
   amount: number;
@@ -182,17 +175,6 @@ function endOfToday(): Date {
   return d;
 }
 
-function bucketByHour(transactions: RawTransaction[]): number[] {
-  const hours = new Array(24).fill(0) as number[];
-  for (const tx of transactions) {
-    if (tx.type !== "expense") continue;
-    const d = new Date(tx.occurredAt);
-    const hour = d.getHours();
-    hours[hour] += Math.abs(toNumber(tx.amount));
-  }
-  return hours;
-}
-
 /* ──────────────────────────────────────────────────────────────────────
    COMPONENT PROP SHAPES
    (CardSummary and QuickContact's old "plan"/contacts fields are gone —
@@ -206,12 +188,6 @@ interface Transaction {
   amount: number; // negative = money out
   badge: "paypal" | "twitch" | "airbnb" | "dribbble" | "other";
   cardId: string | null;
-}
-
-interface SpendingCategory {
-  label: string;
-  thisMonth: number; // 0–100, normalized client-side (see mapping below)
-  average: number; // 0–100
 }
 
 interface CardSummary {
@@ -232,7 +208,6 @@ interface BudgetPoint {
 }
 
 interface DashboardData {
-  spending: SpendingCategory[];
   cards: CardSummary[]; // stable order (default first); the stack order lives in Dashboard state
   budget: BudgetPoint[];
   user: { name: string; initials: string; email: string };
@@ -275,10 +250,9 @@ async function loadDashboardData(): Promise<DashboardData> {
     granularity: BUDGET_TIMELINE_GRANULARITY,
   });
 
-  const [dashboard, me, radar, overTime] = await Promise.all([
+  const [dashboard, me, overTime] = await Promise.all([
     apiGet<DashboardResponse>("/dashboard"),
     apiGet<MeResponse>("/auth/me"),
-    apiGet<{ radar: RadarRow[] }>("/analytics/spending-radar"),
     apiGet<{ spending_over_time: SpendingOverTimeRow[] }>(
       `/analytics/spending-over-time?${timelineParams.toString()}`,
     ),
@@ -291,17 +265,6 @@ async function loadDashboardData(): Promise<DashboardData> {
   const cards: CardSummary[] = dashboard.cards
     .map((c) => mapCard(c))
     .filter((c): c is CardSummary => c !== null);
-
-  // ── spending radar: real dollar amounts normalized to a 0–100 scale
-  // against the largest value in the set, so the radar shape is
-  // preserved even though the chart itself assumes a 0–100 range. ──
-  const radarRows = radar.radar;
-  const maxRadarValue = Math.max(1, ...radarRows.flatMap((r) => [r.this_period, r.average]));
-  const spending: SpendingCategory[] = radarRows.map((r) => ({
-    label: r.name,
-    thisMonth: Math.round((r.this_period / maxRadarValue) * 100),
-    average: Math.round((r.average / maxRadarValue) * 100),
-  }));
 
   // ── budget/spend-over-time line chart ──
   const budget: BudgetPoint[] = overTime.spending_over_time.map((row) => ({
@@ -322,7 +285,7 @@ async function loadDashboardData(): Promise<DashboardData> {
     (email ? email.split("@")[0] : "Account");
   const user = { name: fullName, initials: initialsFromName(fullName), email };
 
-  return { spending, cards, budget, user };
+  return { cards, budget, user };
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -442,7 +405,7 @@ const styles = `
 /* new rows ease in instead of popping */
 @keyframes db-row-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 .db-tx-list .db-tx { animation: db-row-in 0.4s ease both; }
-.db-card__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.db-card__head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
 .db-card__title { font-size: 16px; font-weight: 700; margin: 0; }
 .db-card__subtitle { font-size: 12px; color: var(--muted); margin: 3px 0 0; }
 
@@ -464,10 +427,6 @@ const styles = `
 .db-empty-note { font-size: 13.5px; color: var(--muted); padding: 8px 0; }
 
 /* ── spending / legend ── */
-.db-legend { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: var(--muted); }
-.db-legend__item { display: flex; align-items: center; gap: 6px; }
-.db-legend__swatch { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.db-radar-label { font-size: 11.5px; fill: var(--muted); font-family: inherit; }
 
 /* ── income / expenses / savings donut ── */
 .db-pie-wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; }
@@ -491,10 +450,6 @@ const styles = `
 .db-pie-legend__name { font-size: 13.5px; font-weight: 700; margin: 0; }
 .db-pie-legend__hint { font-size: 12px; color: var(--muted); margin: 2px 0 0; }
 .db-pie-legend__amount { font-size: 14px; font-weight: 700; white-space: nowrap; }
-/* pie section inside the Spending island, with its own period selector */
-.db-pie-section { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
-.db-pie-section__head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-.db-pie-section__title { font-size: 15px; font-weight: 700; margin: 0; }
 .db-toggle-row--sm { width: auto; }
 .db-toggle-row--sm .db-toggle-btn { height: 34px; padding: 0 12px; font-size: 13px; border-radius: 10px; }
 .db-pie-note { font-size: 11.5px; color: var(--muted); text-align: center; margin: 10px 0 0; }
@@ -716,19 +671,6 @@ const BADGE_INITIAL: Record<Transaction["badge"], string> = {
 /* ──────────────────────────────────────────────────────────────────────
    SMALL CHART HELPERS (pure SVG, no chart library dependency)
    ────────────────────────────────────────────────────────────────────── */
-function radarPolygon(values: number[], cx: number, cy: number, radius: number, max = 100) {
-  const n = values.length;
-  return values
-    .map((v, i) => {
-      const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n;
-      const r = (Math.max(0, Math.min(v, max)) / max) * radius;
-      const x = cx + r * Math.cos(angle);
-      const y = cy + r * Math.sin(angle);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-}
-
 function smoothPath(points: { x: number; y: number }[]) {
   if (points.length < 2) return "";
   let d = `M ${points[0].x},${points[0].y}`;
@@ -1342,69 +1284,6 @@ function TransactionsCard({
   );
 }
 
-/* ── Spending card: Month/Week (radar, existing data) + Day (24hr bar
-   chart, freshly fetched and bucketed client-side per hour).
-   Known limitation: "Week" reuses the same `categories` prop as "Month"
-   since the backend doesn't expose a separate weekly-vs-average dataset
-   today — it's a relabeled view of the same numbers, not a real week
-   slice. ── */
-type SpendingRange = "month" | "week" | "day";
-
-function HourlyBarChart({ hours }: { hours: number[] }) {
-  const width = 560;
-  const height = 220;
-  const padL = 34;
-  const padB = 22;
-  const padT = 10;
-  const chartW = width - padL - 10;
-  const chartH = height - padB - padT;
-
-  const max = Math.max(1, ...hours);
-  const barW = chartW / 24;
-
-  return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      width="100%"
-      height="auto"
-      role="img"
-      aria-label="Spending by hour, last 24 hours"
-    >
-      {[0, 0.5, 1].map((f) => {
-        const y = padT + chartH - f * chartH;
-        return <line key={f} x1={padL} y1={y} x2={width - 10} y2={y} stroke="var(--line)" strokeDasharray="3 4" />;
-      })}
-      {hours.map((v, h) => {
-        const barH = (v / max) * chartH;
-        const x = padL + h * barW;
-        const y = padT + chartH - barH;
-        return (
-          <rect
-            key={h}
-            x={x + 1}
-            y={y}
-            width={Math.max(1, barW - 2)}
-            height={Math.max(0, barH)}
-            fill="var(--lime-deep)"
-            rx={2}
-          />
-        );
-      })}
-      {[0, 6, 12, 18, 23].map((h) => (
-        <text
-          key={h}
-          x={padL + h * barW + barW / 2}
-          y={height - 4}
-          textAnchor="middle"
-          className="db-axis-label"
-        >
-          {h}:00
-        </text>
-      ))}
-    </svg>
-  );
-}
-
 const usd = (v: number) =>
   `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const usdCompact = (v: number) =>
@@ -1415,14 +1294,16 @@ type PieRange = "all" | "month" | "week" | "day";
 
 const PIE_RANGES: { key: PieRange; label: string; short: string; phrase: string }[] = [
   { key: "all", label: "All time", short: "all time", phrase: "across all time" },
-  { key: "month", label: "Month", short: "this month", phrase: "this month" },
-  { key: "week", label: "Week", short: "last 7 days", phrase: "over the last 7 days" },
   { key: "day", label: "Day", short: "today", phrase: "today" },
+  { key: "week", label: "Week", short: "last 7 days", phrase: "over the last 7 days" },
+  { key: "month", label: "Month", short: "this month", phrase: "this month" },
 ];
 
-// The transactions endpoint is fetched with the same page size the rest of
-// this file already uses; if a period hits it, the pie says it's partial.
-const PIE_FETCH_LIMIT = 200;
+// GET /transactions rejects a `limit` above 100 (that was the error the
+// 200-row requests were hitting), so the pie pages through results 100 at a
+// time and sums them itself.
+const PIE_PAGE_SIZE = 100;
+const PIE_MAX_PAGES = 10; // safety cap: at most 1,000 transactions per period
 
 // Day = today, Week = the last 7 days including today, Month = the calendar
 // month so far, All time = no date filter.
@@ -1589,14 +1470,53 @@ function IncomePie({
   );
 }
 
-/* The pie plus its own All time / Month / Week / Day selector. Totals are
-   summed client-side from the transactions in the chosen period. */
-function IncomeBreakdown({ refreshKey }: { refreshKey: number }) {
+/* Pages through /transactions for a period (max 100 rows per request) and
+   returns everything it found. Page 1 uses exactly the params the rest of
+   the app already sends. For page 2+ it adds `page`; if the backend rejects
+   that, or ignores it and returns the same rows again, it stops and flags
+   the result as partial instead of double-counting or failing. */
+async function fetchTransactionsForRange(
+  range: PieRange,
+): Promise<{ transactions: RawTransaction[]; truncated: boolean }> {
+  const { start, end } = pieRangeBounds(range);
+  const seen = new Map<string, RawTransaction>();
+
+  for (let page = 1; page <= PIE_MAX_PAGES; page++) {
+    const params = new URLSearchParams({ limit: String(PIE_PAGE_SIZE) });
+    if (start && end) {
+      params.set("start_date", start.toISOString());
+      params.set("end_date", end.toISOString());
+    }
+    if (page > 1) params.set("page", String(page));
+
+    let batch: RawTransaction[];
+    try {
+      const res = await apiGet<{ transactions: RawTransaction[] }>(`/transactions?${params.toString()}`);
+      batch = res.transactions;
+    } catch (err) {
+      if (page === 1) throw err;
+      return { transactions: [...seen.values()], truncated: true };
+    }
+
+    const before = seen.size;
+    for (const tx of batch) seen.set(tx.id, tx);
+
+    if (batch.length < PIE_PAGE_SIZE) return { transactions: [...seen.values()], truncated: false };
+    if (seen.size === before) return { transactions: [...seen.values()], truncated: true };
+  }
+  return { transactions: [...seen.values()], truncated: true };
+}
+
+/* Spending island: the income / expenses / savings donut with its own
+   All time / Day / Week / Month selector. Totals are summed client-side
+   from the transactions in the chosen period. */
+function SpendingCard({ refreshKey }: { refreshKey: number }) {
   const [range, setRange] = useState<PieRange>("month");
   const [result, setResult] = useState<{
     range: PieRange;
     income: number;
     expense: number;
+    count: number;
     truncated: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1607,24 +1527,16 @@ function IncomeBreakdown({ refreshKey }: { refreshKey: number }) {
 
     async function run() {
       try {
-        const { start, end } = pieRangeBounds(range);
-        const params = new URLSearchParams({ limit: String(PIE_FETCH_LIMIT) });
-        if (start && end) {
-          params.set("start_date", start.toISOString());
-          params.set("end_date", end.toISOString());
-        }
-        const res = await apiGet<{ transactions: RawTransaction[] }>(
-          `/transactions?${params.toString()}`,
-        );
+        const { transactions, truncated } = await fetchTransactionsForRange(range);
         if (cancelled) return;
         let income = 0;
         let expense = 0;
-        for (const tx of res.transactions) {
+        for (const tx of transactions) {
           const amt = Math.abs(toNumber(tx.amount));
           if (tx.type === "income") income += amt;
           else expense += amt;
         }
-        setResult({ range, income, expense, truncated: res.transactions.length >= PIE_FETCH_LIMIT });
+        setResult({ range, income, expense, count: transactions.length, truncated });
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Couldn't load this period.");
       }
@@ -1640,9 +1552,9 @@ function IncomeBreakdown({ refreshKey }: { refreshKey: number }) {
   const loading = !error && (!result || result.range !== range);
 
   return (
-    <div className="db-pie-section">
-      <div className="db-pie-section__head">
-        <h4 className="db-pie-section__title">Income vs expenses</h4>
+    <Island>
+      <div className="db-card__head">
+        <h3 className="db-card__title">Spending</h3>
         <div className="db-toggle-row db-toggle-row--sm">
           {PIE_RANGES.map((r) => (
             <button
@@ -1669,147 +1581,10 @@ function IncomeBreakdown({ refreshKey }: { refreshKey: number }) {
             phrase={shown.phrase}
           />
           {result.truncated && (
-            <p className="db-pie-note">Based on your {PIE_FETCH_LIMIT} most recent transactions in this period.</p>
+            <p className="db-pie-note">Based on the {result.count} most recent transactions in this period.</p>
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function SpendingCard({
-  categories,
-  refreshKey,
-}: {
-  categories: SpendingCategory[];
-  refreshKey: number;
-}) {
-  const [range, setRange] = useState<SpendingRange>("month");
-  const [hourly, setHourly] = useState<number[] | null>(null);
-  const [dayError, setDayError] = useState<string | null>(null);
-  const [dayLoading, setDayLoading] = useState(false);
-  const isRadar = range === "month" || range === "week";
-
-  useEffect(() => {
-    if (range !== "day") return;
-    let cancelled = false;
-
-    async function run() {
-      setDayLoading(true);
-      setDayError(null);
-      try {
-        const params = new URLSearchParams({
-          start_date: startOfToday().toISOString(),
-          end_date: endOfToday().toISOString(),
-          limit: "200",
-        });
-        const result = await apiGet<{ transactions: RawTransaction[] }>(
-          `/transactions?${params.toString()}`,
-        );
-        if (!cancelled) setHourly(bucketByHour(result.transactions));
-      } catch (err) {
-        if (!cancelled) {
-          setDayError(err instanceof Error ? err.message : "Couldn't load today's spending.");
-        }
-      } finally {
-        if (!cancelled) setDayLoading(false);
-      }
-    }
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [range, refreshKey]);
-
-  const size = 260;
-  const cx = size / 2;
-  const cy = size / 2 + 6;
-  const radius = 92;
-  const n = categories.length;
-  const rings = [0.33, 0.66, 1];
-  const thisMonthPts = radarPolygon(categories.map((c) => c.thisMonth), cx, cy, radius);
-  const averagePts = radarPolygon(categories.map((c) => c.average), cx, cy, radius);
-
-  return (
-    <Island>
-      <div className="db-card__head">
-        <h3 className="db-card__title">Spending</h3>
-        <div className="db-toggle-row" style={{ width: "auto" }}>
-          {(["month", "week", "day"] as SpendingRange[]).map((r) => (
-            <button
-              key={r}
-              type="button"
-              className={`db-toggle-btn ${range === r ? "active" : ""}`}
-              onClick={() => setRange(r)}
-            >
-              {r === "month" ? "Month" : r === "week" ? "Week" : "Day"}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {isRadar && n === 0 && (
-        <p className="db-empty-note">Not enough data yet to chart spending by category.</p>
-      )}
-
-      {isRadar && n > 0 && (
-        <>
-          <div className="db-legend" style={{ marginBottom: 10 }}>
-            <span className="db-legend__item">
-              <span className="db-legend__swatch" style={{ background: "var(--lime)" }} /> This {range}
-            </span>
-            <span className="db-legend__item">
-              <span className="db-legend__swatch" style={{ border: "1.5px solid var(--ink)", background: "transparent" }} /> Average
-            </span>
-          </div>
-          <svg viewBox={`0 0 ${size} ${size + 20}`} width="100%" height="auto" role="img" aria-label={`Spending by category, this ${range} versus average`}>
-            {rings.map((r) => (
-              <polygon
-                key={r}
-                points={radarPolygon(categories.map(() => 100 * r), cx, cy, radius)}
-                fill="none"
-                stroke="var(--line)"
-                strokeWidth={1}
-              />
-            ))}
-            {categories.map((_, i) => {
-              const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n;
-              const x = cx + radius * Math.cos(angle);
-              const y = cy + radius * Math.sin(angle);
-              return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke="var(--line)" strokeWidth={1} />;
-            })}
-            <polygon points={thisMonthPts} fill="var(--lime)" fillOpacity={0.85} stroke="var(--lime-deep)" strokeWidth={1.5} />
-            <polygon points={averagePts} fill="none" stroke="var(--ink)" strokeWidth={1.5} />
-            {categories.map((c, i) => {
-              const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n;
-              const lx = cx + (radius + 24) * Math.cos(angle);
-              const ly = cy + (radius + 20) * Math.sin(angle);
-              const anchor = Math.cos(angle) > 0.3 ? "start" : Math.cos(angle) < -0.3 ? "end" : "middle";
-              return (
-                <text key={c.label} x={lx} y={ly} textAnchor={anchor} className="db-radar-label">
-                  {c.label}
-                </text>
-              );
-            })}
-          </svg>
-        </>
-      )}
-
-      {range === "day" && (
-        <>
-          {dayLoading && <p className="db-empty-note">Loading today's spending…</p>}
-          {!dayLoading && dayError && <div className="db-form-error">{dayError}</div>}
-          {!dayLoading && !dayError && hourly && hourly.every((v) => v === 0) && (
-            <p className="db-empty-note">No spending recorded today.</p>
-          )}
-          {!dayLoading && !dayError && hourly && !hourly.every((v) => v === 0) && (
-            <HourlyBarChart hours={hourly} />
-          )}
-        </>
-      )}
-
-      <IncomeBreakdown refreshKey={refreshKey} />
     </Island>
   );
 }
@@ -2299,7 +2074,7 @@ export default function Dashboard() {
             </div>
 
             <div className="db-grid__col2">
-              <SpendingCard categories={data.spending} refreshKey={txVersion} />
+              <SpendingCard refreshKey={txVersion} />
               <BudgetCard points={data.budget} />
             </div>
 

@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import SignUp from "./Auth/SignUp";
-import SignIn from "./Auth/SignIn";
 import Dashboard from "./Dashboard/Dashboard";
+import SignIn from "./Auth/SignIn";
 
 function App() {
   return (

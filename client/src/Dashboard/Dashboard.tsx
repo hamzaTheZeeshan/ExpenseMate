@@ -5,7 +5,7 @@ import { promo } from "./Assets.promo";
 /* ──────────────────────────────────────────────────────────────────────
    CONFIG
    ────────────────────────────────────────────────────────────────────── */
-const API_BASE_URL = "http://localhost:5000/api/v1"; // matches SignIn.tsx / SignUp.tsx
+const API_BASE_URL = "https://expense-mate-zmxv.vercel.app/api/v1"; // matches SignIn.tsx / SignUp.tsx
 
 // How much history to pull for the budget/spend-over-time line chart.
 const BUDGET_TIMELINE_DAYS_BACK = 56; // ~8 weeks
@@ -795,7 +795,6 @@ const Svg = ({ children, size = 20 }: { children: ReactNode; size?: number }) =>
   </svg>
 );
 const GearIcon = () => <Svg><circle cx="12" cy="12" r="3" /><path d="M19.4 13.5a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V20a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H4a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3H10a1.7 1.7 0 0 0 1-1.5V4a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9V10a1.7 1.7 0 0 0 1.5 1H20a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1Z" /></Svg>;
-const ChevronDown = () => <Svg size={14}><path d="m6 9 6 6 6-6" /></Svg>;
 const ArrowRight = () => <Svg size={13}><path d="m9 6 6 6-6 6" /></Svg>;
 const PlusIcon = () => <Svg size={16}><path d="M12 5v14M5 12h14" /></Svg>;
 const CloseIcon = () => <Svg size={16}><path d="M6 6l12 12M18 6L6 18" /></Svg>;

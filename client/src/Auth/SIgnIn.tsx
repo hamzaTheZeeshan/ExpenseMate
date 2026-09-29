@@ -133,7 +133,7 @@ const styles = `
 `;
 
 /* ──────────────── CONFIG (replace these with your real values) ──────────────── */
-const API_BASE_URL = "http://localhost:5000/api/v1"; // e.g. import.meta.env.VITE_API_URL
+const API_BASE_URL = "https://expense-mate-zmxv.vercel.app/api/v1"; // e.g. import.meta.env.VITE_API_URL
 const SIGNIN_ENDPOINT = "/auth/login"; // POST { email, password }
 const GOOGLE_AUTH_ENDPOINT = "/auth/google"; // POST { idToken }
 const SIGN_UP_PATH = "/signup"; // where "Sign up" link goes

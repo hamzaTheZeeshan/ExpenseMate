@@ -45,6 +45,41 @@ function buildWhere(userId, filters = {}) {
 }
 
 /**
+ * Applies (or reverses) a transaction's effect on its card, using the
+ * given Prisma transaction client.
+ *
+ *   expense: creditLimit -= amount, creditUsed += amount
+ *   income:  creditLimit += amount
+ *
+ * Pass reverse = true to undo the effect (used on update and delete).
+ * Does nothing if the transaction has no card.
+ */
+async function applyCardEffect(tx, { cardId, type, amount }, reverse = false) {
+  if (!cardId) return;
+
+  let data;
+  if (type === "expense") {
+    data = reverse
+      ? {
+          creditLimit: { increment: amount },
+          creditUsed: { decrement: amount },
+        }
+      : {
+          creditLimit: { decrement: amount },
+          creditUsed: { increment: amount },
+        };
+  } else if (type === "income") {
+    data = {
+      creditLimit: reverse ? { decrement: amount } : { increment: amount },
+    };
+  } else {
+    return;
+  }
+
+  await tx.card.update({ where: { id: cardId }, data });
+}
+
+/**
  * @param {string} userId
  * @param {object} filters - { type, category_id, card_id, start_date, end_date }
  * @param {object} pagination - { page, limit, sort }, sort as "field:direction"
@@ -77,18 +112,27 @@ export async function findById(id) {
 }
 
 export async function create(userId, data) {
-  return prisma.transaction.create({
-    data: {
-      userId,
-      type: data.type,
-      amount: data.amount,
-      merchant: data.merchant,
-      note: data.note,
-      cardId: data.card_id ?? null,
-      categoryId: data.category_id ?? null,
-      occurredAt: data.occurred_at ?? new Date(),
-    },
-    include: { card: true, category: true },
+  return prisma.$transaction(async (tx) => {
+    const created = await tx.transaction.create({
+      data: {
+        userId,
+        type: data.type,
+        amount: data.amount,
+        merchant: data.merchant,
+        note: data.note,
+        cardId: data.card_id ?? null,
+        categoryId: data.category_id ?? null,
+        occurredAt: data.occurred_at ?? new Date(),
+      },
+    });
+
+    await applyCardEffect(tx, created);
+
+    // Re-read so the included card reflects the updated limit/used values.
+    return tx.transaction.findUnique({
+      where: { id: created.id },
+      include: { card: true, category: true },
+    });
   });
 }
 
@@ -103,15 +147,39 @@ export async function update(id, data) {
   if (data.category_id !== undefined) updateData.categoryId = data.category_id;
   if (data.occurred_at !== undefined) updateData.occurredAt = data.occurred_at;
 
-  return prisma.transaction.update({
-    where: { id },
-    data: updateData,
-    include: { card: true, category: true },
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.transaction.findUnique({ where: { id } });
+
+    // Undo the old transaction's effect on its (old) card.
+    if (existing) await applyCardEffect(tx, existing, true);
+
+    // If the record doesn't exist, this throws as it did before.
+    const updated = await tx.transaction.update({
+      where: { id },
+      data: updateData,
+    });
+
+    // Apply the new values to the (possibly different) card.
+    await applyCardEffect(tx, updated);
+
+    return tx.transaction.findUnique({
+      where: { id },
+      include: { card: true, category: true },
+    });
   });
 }
 
 export async function deleteTransaction(id) {
-  return prisma.transaction.delete({ where: { id } });
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.transaction.findUnique({ where: { id } });
+
+    const deleted = await tx.transaction.delete({ where: { id } });
+
+    // Deleting a transaction restores the card to how it was before.
+    if (existing) await applyCardEffect(tx, existing, true);
+
+    return deleted;
+  });
 }
 
 export async function isOwnedByUser(id, userId) {
@@ -138,7 +206,6 @@ export async function sumByTypeForUser(userId, filters = {}) {
     _sum: { amount: true },
   });
 }
-
 
 /**
  * Sums expense-type transaction amounts for a single user + category,

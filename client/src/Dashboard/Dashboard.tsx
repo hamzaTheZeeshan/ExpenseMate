@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+// NOTE: adjust this path to wherever your Assets.ts actually lives relative to this file.
+import { promo } from "./Assets.promo";
 
 /* ──────────────────────────────────────────────────────────────────────
    CONFIG
@@ -230,9 +232,8 @@ interface BudgetPoint {
 }
 
 interface DashboardData {
-  transactions: Transaction[];
   spending: SpendingCategory[];
-  card: CardSummary | null;
+  cards: CardSummary[]; // stable order (default first); the stack order lives in Dashboard state
   budget: BudgetPoint[];
   user: { name: string; initials: string; email: string };
 }
@@ -283,22 +284,13 @@ async function loadDashboardData(): Promise<DashboardData> {
     ),
   ]);
 
-  // ── transactions ──
-  const allTransactions: Transaction[] = dashboard.recent_transactions.map(mapTransaction);
-
-  // ── primary card: is_default, else the first (cards are already
-  // ordered isDefault desc by card.repository.findAllForUser) ──
-  const rawPrimary = dashboard.cards.find((c) => c.isDefault) ?? dashboard.cards[0] ?? null;
-  const card = mapCard(rawPrimary);
-
-  // "Recent transactions" is scoped to the card shown in the credit-card
-  // widget, matched on cardId (confirmed against POST /transactions'
-  // response — the raw field is camelCase, not card_id). If a transaction
-  // has no cardId it's left out of this scoped view rather than silently
-  // attributed to the wrong card.
-  const transactions: Transaction[] = card
-    ? allTransactions.filter((tx) => tx.cardId === card.id)
-    : allTransactions;
+  // ── cards: every card the user owns, default first (already ordered
+  // isDefault desc by card.repository.findAllForUser). Recent transactions
+  // are no longer taken from this payload — they're fetched per card, see
+  // Dashboard() below, so every card in the stack gets a real list. ──
+  const cards: CardSummary[] = dashboard.cards
+    .map((c) => mapCard(c))
+    .filter((c): c is CardSummary => c !== null);
 
   // ── spending radar: real dollar amounts normalized to a 0–100 scale
   // against the largest value in the set, so the radar shape is
@@ -330,7 +322,7 @@ async function loadDashboardData(): Promise<DashboardData> {
     (email ? email.split("@")[0] : "Account");
   const user = { name: fullName, initials: initialsFromName(fullName), email };
 
-  return { transactions, spending, card, budget, user };
+  return { spending, cards, budget, user };
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -437,14 +429,19 @@ const styles = `
 }
 .db-grid__col1 { display: flex; flex-direction: column; gap: 16px; }
 .db-grid__col2 { display: flex; flex-direction: column; gap: 16px; }
-.db-grid__promo { grid-row: 1 / span 2; height: 100%; }
+.db-grid__promo { grid-row: 1 / span 2; align-self: start; }
 
 .db-card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 24px;
-  padding: 22px;
+  overflow: hidden;
+  transition: height 0.45s cubic-bezier(0.32, 0.08, 0.24, 1);
 }
+.db-card__inner { padding: 22px; }
+/* new rows ease in instead of popping */
+@keyframes db-row-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.db-tx-list .db-tx { animation: db-row-in 0.4s ease both; }
 .db-card__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .db-card__title { font-size: 16px; font-weight: 700; margin: 0; }
 .db-card__subtitle { font-size: 12px; color: var(--muted); margin: 3px 0 0; }
@@ -473,19 +470,41 @@ const styles = `
 .db-radar-label { font-size: 11.5px; fill: var(--muted); font-family: inherit; }
 
 /* ── credit card widget ── */
-.db-card-stack { position: relative; margin-bottom: 26px; }
+/* stacked cards: every card is absolutely positioned; --pos (0 = front)
+   drives its offset/scale, so switching cards is just a transition. */
+.db-card-stack { position: relative; margin-bottom: 18px; }
+.db-stack { position: relative; transition: height 0.45s cubic-bezier(0.32, 0.08, 0.24, 1); }
+.db-stack--clickable { cursor: pointer; }
+.db-stack:focus-visible { outline: 2px solid var(--lime-deep); outline-offset: 6px; border-radius: 20px; }
 .db-visual-card {
-  position: relative;
-  background: var(--lime);
-  border-radius: 20px;
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 150px;
   padding: 18px 20px 16px;
-  min-height: 130px;
+  border-radius: 20px;
+  background: var(--lime);
+  color: var(--ink);
+  transform-origin: top center;
+  transform: translateY(calc(var(--pos, 0) * 18px)) scale(calc(1 - var(--pos, 0) * 0.04));
+  transition: transform 0.5s cubic-bezier(0.32, 0.08, 0.24, 1), opacity 0.3s ease, box-shadow 0.3s ease;
+  box-shadow: 0 8px 20px rgba(10,10,10,0.10);
+  user-select: none;
 }
-.db-visual-card__chip { width: 34px; height: 24px; border-radius: 6px; background: rgba(10,10,10,0.15); position: absolute; top: 18px; right: 20px; }
+.db-visual-card.is-hidden { opacity: 0; pointer-events: none; }
+/* phase 1 of the swap: the front card lifts and tilts out before dropping behind */
+.db-visual-card.is-leaving {
+  transform: translate(16px, -12px) rotate(4deg);
+  transition-duration: 0.26s;
+  box-shadow: 0 16px 32px rgba(10,10,10,0.18);
+}
+.db-visual-card--v1 { background: var(--ink); color: #fff; }
+.db-visual-card--v2 { background: #cfd9bd; }
+.db-visual-card--v3 { background: #4d5c3a; color: #fff; }
+.db-visual-card__chip { position: absolute; top: 16px; right: 20px; opacity: 0.55; }
 .db-visual-card__name { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
 .db-visual-card__balance { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
 .db-visual-card__balance small { font-size: 15px; font-weight: 700; }
-.db-visual-card__foot { display: flex; align-items: flex-end; justify-content: space-between; margin-top: 22px; font-size: 13px; font-weight: 600; letter-spacing: 0.03em; }
+.db-visual-card__foot { position: absolute; left: 20px; right: 20px; bottom: 16px; display: flex; align-items: flex-end; justify-content: space-between; font-size: 13px; font-weight: 600; letter-spacing: 0.03em; }
+.db-stack-hint { font-size: 12px; color: var(--muted); text-align: center; margin: 14px 0 0; }
 
 .db-card-meta { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
 .db-card-meta__row { display: flex; align-items: center; justify-content: space-between; font-size: 13.5px; }
@@ -512,28 +531,57 @@ const styles = `
 .db-tooltip-text { fill: #fff; font-size: 12px; font-weight: 700; font-family: inherit; }
 .db-axis-label { font-size: 11px; fill: var(--muted); font-family: inherit; }
 
-/* ── promo card (now stretches to fill the tall spanning cell) ── */
+/* ── promo card: image-based ad that flips to reveal the plan on its back ── */
 .db-promo {
-  background: var(--lime);
+  perspective: 1200px;
   border-radius: 24px;
-  padding: 26px 24px;
-  display: flex; flex-direction: column;
-  height: 100%;
-  min-height: 300px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-.db-promo__heading { font-size: 30px; font-weight: 800; line-height: 1.08; letter-spacing: -0.02em; margin: 0; }
-.db-promo__body { font-size: 13.5px; color: rgba(10,10,10,0.7); line-height: 1.5; margin: 10px 0 0; }
-.db-tips-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 10px; font-size: 14px; line-height: 1.5; }
+.db-promo:focus-visible { outline: 2px solid var(--lime-deep); outline-offset: 4px; }
+.db-promo__inner {
+  display: grid; /* both faces share one cell, so the card is as tall as the taller face */
+  transform-style: preserve-3d;
+  transition: transform 0.7s cubic-bezier(0.4, 0.2, 0.2, 1);
+}
+.db-promo.is-flipped .db-promo__inner { transform: rotateY(180deg); }
+.db-promo__face {
+  grid-area: 1 / 1;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border-radius: 24px;
+  overflow: hidden;
+  background: #c9f44f; /* sampled from the ad image so any leftover space blends in */
+}
+.db-promo__face--front { line-height: 0; }
+.db-promo__img { width: 100%; height: auto; display: block; }
+.db-promo__face--back {
+  transform: rotateY(180deg);
+  padding: 26px 22px 20px;
+  display: flex; flex-direction: column;
+}
+.db-promo__back-title { font-size: 24px; font-weight: 800; line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
 .db-promo__pill {
   display: inline-flex; align-items: center; justify-content: center;
-  padding: 2px 10px; border-radius: 999px; background: var(--ink); color: #fff;
-  font-size: 22px; font-weight: 800; margin: 0 2px;
+  padding: 1px 10px; border-radius: 999px; background: var(--ink); color: #fff;
+  font-size: 20px; font-weight: 800; margin: 0 2px;
 }
-.db-promo__art { flex: 1; display: flex; align-items: flex-end; justify-content: flex-end; margin: 12px 0; }
-.db-promo__cta {
-  width: 100%; height: 46px; border-radius: 999px; border: 0;
-  background: #fff; color: var(--ink); font: inherit; font-size: 14px; font-weight: 700;
-  cursor: pointer;
+.db-promo__back-intro { font-size: 13px; line-height: 1.5; color: rgba(10,10,10,0.72); margin: 10px 0 16px; }
+.db-promo__steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.db-promo__step { display: flex; gap: 10px; align-items: flex-start; }
+.db-promo__step-pct {
+  flex-shrink: 0; min-width: 40px; text-align: center;
+  padding: 3px 0; border-radius: 999px; background: var(--ink); color: #fff;
+  font-size: 12px; font-weight: 800;
+}
+.db-promo__step-title { font-size: 14px; font-weight: 700; margin: 0; }
+.db-promo__step-text { font-size: 12.5px; line-height: 1.45; color: rgba(10,10,10,0.72); margin: 2px 0 0; }
+.db-promo__back-note { font-size: 12.5px; line-height: 1.45; font-weight: 600; margin: 18px 0 0; }
+.db-promo__flip-hint { margin-top: auto; padding-top: 16px; font-size: 12px; font-weight: 600; color: rgba(10,10,10,0.55); text-align: center; }
+@media (prefers-reduced-motion: reduce) {
+  .db-promo__inner { transition-duration: 0.01s; }
+  .db-card, .db-stack { transition-duration: 0.01s; }
+  .db-tx-list .db-tx { animation: none; }
 }
 
 /* ── page-level loading/error ── */
@@ -594,12 +642,12 @@ const styles = `
 
 @media (max-width: 1100px) {
   .db-grid { grid-template-columns: 1fr 1fr; }
-  .db-grid__promo { grid-row: auto; height: auto; }
+  .db-grid__promo { grid-row: auto; }
 }
 @media (max-width: 760px) {
   .db-page { flex-direction: column; }
   .db-grid { grid-template-columns: 1fr; }
-  .db-grid__promo { grid-row: auto; height: auto; }
+  .db-grid__promo { grid-row: auto; }
 }
 `;
 
@@ -612,9 +660,7 @@ const Svg = ({ children, size = 20 }: { children: ReactNode; size?: number }) =>
     {children}
   </svg>
 );
-const InboxIcon = () => <Svg><rect x="3" y="5" width="18" height="14" rx="2.5" /><path d="m4 7 8 6 8-6" /></Svg>;
 const GearIcon = () => <Svg><circle cx="12" cy="12" r="3" /><path d="M19.4 13.5a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V20a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H4a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3H10a1.7 1.7 0 0 0 1-1.5V4a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9V10a1.7 1.7 0 0 0 1.5 1H20a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1Z" /></Svg>;
-const BellIcon = () => <Svg><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" /><path d="M10 19a2 2 0 0 0 4 0" /></Svg>;
 const ChevronDown = () => <Svg size={14}><path d="m6 9 6 6 6-6" /></Svg>;
 const ArrowRight = () => <Svg size={13}><path d="m9 6 6 6-6 6" /></Svg>;
 const PlusIcon = () => <Svg size={16}><path d="M12 5v14M5 12h14" /></Svg>;
@@ -974,15 +1020,18 @@ const EMPTY_TX_FORM: NewTransactionForm = {
 };
 
 function AddTransactionModal({
-  card,
+  cards,
+  defaultCardId,
   onClose,
   onCreated,
 }: {
-  card: CardSummary | null;
+  cards: CardSummary[];
+  defaultCardId: string | null;
   onClose: () => void;
-  onCreated: (tx: Transaction, updatedCard: CardSummary | null) => void;
+  onCreated: (tx: Transaction, updatedCard: CardSummary | null, cardId: string) => void;
 }) {
   const [form, setForm] = useState<NewTransactionForm>(EMPTY_TX_FORM);
+  const [cardId, setCardId] = useState<string>(defaultCardId ?? cards[0]?.id ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -991,7 +1040,7 @@ function AddTransactionModal({
   }
 
   function validate(): string | null {
-    if (!card) return "Add a card before recording a transaction.";
+    if (!cardId) return "Add a card before recording a transaction.";
     const amount = Number(form.amount);
     if (!form.amount || Number.isNaN(amount) || amount <= 0) return "Enter an amount greater than 0.";
     if (!form.merchant.trim()) return "Enter a merchant or description.";
@@ -1005,7 +1054,6 @@ function AddTransactionModal({
       setError(validationError);
       return;
     }
-    if (!card) return;
     setError(null);
     setSubmitting(true);
     try {
@@ -1013,10 +1061,10 @@ function AddTransactionModal({
         amount: Number(form.amount),
         merchant: form.merchant.trim(),
         type: form.type,
-        card_id: card.id,
+        card_id: cardId,
       });
       const { card: rawCard, ...rawTx } = result.transaction;
-      onCreated(mapTransaction(rawTx), mapCard(rawCard));
+      onCreated(mapTransaction(rawTx), mapCard(rawCard), cardId);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't add the transaction. Try again.");
@@ -1030,14 +1078,31 @@ function AddTransactionModal({
       <form onSubmit={handleSubmit} noValidate>
         {error && <div className="db-form-error">{error}</div>}
 
-        {card && (
+        {cards.length === 0 && (
           <p className="db-empty-note" style={{ padding: "0 0 14px" }}>
-            Posting to card ending in {card.last4}.
+            Add a card first, then you can record transactions on it.
           </p>
         )}
 
         <div className="db-field">
-          <label className="db-field__label" htmlFor="tx-type">Type</label>
+          <label className="db-field__label" htmlFor="tx-card">Card</label>
+          <select
+            id="tx-card"
+            className="db-input"
+            value={cardId}
+            onChange={(e) => setCardId(e.target.value)}
+            disabled={cards.length === 0}
+          >
+            {cards.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.holderCardName} · *{c.last4}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="db-field">
+          <label className="db-field__label">Type</label>
           <div className="db-toggle-row">
             <button
               type="button"
@@ -1079,7 +1144,7 @@ function AddTransactionModal({
           />
         </div>
 
-        <button type="submit" className="db-add-card-btn" disabled={submitting || !card}>
+        <button type="submit" className="db-add-card-btn" disabled={submitting || cards.length === 0}>
           {submitting ? "Adding…" : "Add transaction"}
         </button>
       </form>
@@ -1158,19 +1223,53 @@ function AllTransactionsModal({
 /* ──────────────────────────────────────────────────────────────────────
    CARDS
    ────────────────────────────────────────────────────────────────────── */
+/* Island: the white card shell. Its height is measured with a
+   ResizeObserver and applied as an explicit pixel height with a CSS
+   transition, so whenever the content changes size (a transaction is added,
+   a card is added, Month/Week/Day is toggled, data finishes loading) the
+   card eases to its new height instead of snapping. (`height: auto` can't
+   be transitioned, which is why this is done in JS.) */
+function Island({ children }: { children: ReactNode }) {
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+    const measure = () => setHeight(el.offsetHeight);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div className="db-card" style={height === null ? undefined : { height: height + 2 }}>
+      <div className="db-card__inner" ref={innerRef}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function TransactionsCard({
   transactions,
+  loading,
+  error,
   cardLast4,
   onViewAll,
   onAddTransaction,
 }: {
   transactions: Transaction[];
+  loading: boolean;
+  error: string | null;
   cardLast4: string | null;
   onViewAll: () => void;
   onAddTransaction: () => void;
 }) {
   return (
-    <div className="db-card">
+    <Island>
       <div className="db-card__head">
         <div>
           <h3 className="db-card__title">Recent transactions</h3>
@@ -1185,7 +1284,11 @@ function TransactionsCard({
           </button>
         </div>
       </div>
-      {transactions.length === 0 ? (
+      {loading ? (
+        <p className="db-empty-note">Loading transactions…</p>
+      ) : error ? (
+        <div className="db-form-error">{error}</div>
+      ) : transactions.length === 0 ? (
         <p className="db-empty-note">No transactions yet.</p>
       ) : (
         <div className="db-tx-list">
@@ -1205,7 +1308,7 @@ function TransactionsCard({
           ))}
         </div>
       )}
-    </div>
+    </Island>
   );
 }
 
@@ -1320,7 +1423,7 @@ function SpendingCard({ categories }: { categories: SpendingCategory[] }) {
   const averagePts = radarPolygon(categories.map((c) => c.average), cx, cy, radius);
 
   return (
-    <div className="db-card">
+    <Island>
       <div className="db-card__head">
         <h3 className="db-card__title">Spending</h3>
         <div className="db-toggle-row" style={{ width: "auto" }}>
@@ -1407,61 +1510,144 @@ function SpendingCard({ categories }: { categories: SpendingCategory[] }) {
           )}
         </>
       )}
-    </div>
+    </Island>
   );
 }
 
+/* Stacked cards. `cards` keeps a STABLE order so React never moves the DOM
+   nodes (moving a node would kill its CSS transition); `order` is the
+   front → back stack order and only drives each card's --pos. Clicking the
+   stack runs a two-phase swap: the front card lifts out (.is-leaving),
+   then `onCycle` rotates the order, so it drops behind while the card that
+   was behind it slides forward. */
 function CreditCardWidget({
-  card,
+  cards,
+  order,
+  onCycle,
   onAddCard,
 }: {
-  card: CardSummary | null;
+  cards: CardSummary[];
+  order: string[];
+  onCycle: () => void;
   onAddCard: () => void;
 }) {
-  if (!card) {
+  const [leavingId, setLeavingId] = useState<string | null>(null);
+  const timer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  if (cards.length === 0) {
     return (
-      <div className="db-card">
+      <Island>
         <p className="db-empty-note">You don't have a card yet.</p>
         <button type="button" className="db-add-card-btn" onClick={onAddCard}>
           <PlusIcon /> Add new card
         </button>
-      </div>
+      </Island>
     );
   }
 
+  const n = cards.length;
+  const front = cards.find((c) => c.id === order[0]) ?? cards[0];
+  const frontNumber = cards.findIndex((c) => c.id === front.id) + 1;
+  const canCycle = n > 1;
+
+  function cycle() {
+    if (!canCycle || leavingId) return;
+    setLeavingId(front.id);
+    timer.current = window.setTimeout(() => {
+      onCycle();
+      setLeavingId(null);
+      timer.current = null;
+    }, 260);
+  }
+
   return (
-    <div className="db-card">
+    <Island>
       <div className="db-card-stack">
-        <div className="db-visual-card">
-          <div className="db-visual-card__chip" />
-          <p className="db-visual-card__name">{card.holderCardName}</p>
-          <div className="db-visual-card__balance">
-            ${Math.trunc(card.balance)}<small>.{(card.balance % 1).toFixed(2).slice(2)}</small>
-          </div>
-          <div className="db-visual-card__foot">
-            <span>*{card.last4} {card.expiry}</span>
-            <span>{card.network}</span>
-          </div>
+        <div
+          className={`db-stack ${canCycle ? "db-stack--clickable" : ""}`}
+          style={{ height: 150 + Math.min(n - 1, 2) * 12 }}
+          onClick={cycle}
+          onKeyDown={(e) => {
+            if (canCycle && (e.key === "Enter" || e.key === " ")) {
+              e.preventDefault();
+              cycle();
+            }
+          }}
+          role={canCycle ? "button" : undefined}
+          tabIndex={canCycle ? 0 : undefined}
+          aria-label={canCycle ? `Card ${frontNumber} of ${n}. Activate to bring the next card forward.` : undefined}
+        >
+          {cards.map((c, i) => {
+            const idx = order.indexOf(c.id);
+            const pos = idx === -1 ? n - 1 : idx;
+            const [whole, cents] = c.creditLimit.toFixed(2).split(".");
+            const classes = [
+              "db-visual-card",
+              `db-visual-card--v${i % 4}`,
+              pos > 2 ? "is-hidden" : "",
+              leavingId === c.id ? "is-leaving" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <div
+                key={c.id}
+                className={classes}
+                style={{ "--pos": Math.min(pos, 2), zIndex: n - pos } as CSSProperties}
+                aria-hidden={pos !== 0}
+              >
+                <svg
+                  className="db-visual-card__chip"
+                  viewBox="0 0 40 30"
+                  width="40"
+                  height="30"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
+                  <rect x="1" y="1" width="38" height="28" rx="6" fill="currentColor" fillOpacity="0.14" />
+                  <rect x="14" y="8" width="12" height="14" rx="3" />
+                  <path d="M1 11h13M1 19h13M26 11h13M26 19h13M20 1v7M20 22v7" />
+                </svg>
+                <p className="db-visual-card__name">{c.holderCardName}</p>
+                <div className="db-visual-card__balance">
+                  ${Number(whole).toLocaleString()}<small>.{cents}</small>
+                </div>
+                <div className="db-visual-card__foot">
+                  <span>*{c.last4} {c.expiry}</span>
+                  <span>{c.network}</span>
+                </div>
+              </div>
+            );
+          })}
         </div>
+        {canCycle && (
+          <p className="db-stack-hint">Card {frontNumber} of {n} · tap to switch</p>
+        )}
       </div>
       <div className="db-card-meta">
         <div className="db-card-meta__row">
-          <span className="db-card-meta__label">Credit limit</span>
-          <span className="db-card-meta__value">${card.creditLimit.toLocaleString()}</span>
-        </div>
-        <div className="db-card-meta__row">
           <span className="db-card-meta__label">Credit used</span>
-          <span className="db-card-meta__value">${card.creditUsed.toFixed(2)}</span>
+          <span className="db-card-meta__value">${front.creditUsed.toFixed(2)}</span>
         </div>
         <div className="db-card-meta__row">
           <span className="db-card-meta__label">Currency</span>
-          <span className="db-card-meta__value">{card.currency}</span>
+          <span className="db-card-meta__value">{front.currency}</span>
         </div>
       </div>
       <button type="button" className="db-add-card-btn" onClick={onAddCard}>
         <PlusIcon /> Add new card
       </button>
-    </div>
+    </Island>
   );
 }
 
@@ -1495,12 +1681,12 @@ function BudgetCard({ points }: { points: BudgetPoint[] }) {
 
   if (points.length === 0) {
     return (
-      <div className="db-card">
+      <Island>
         <div className="db-budget-head">
           <h3 className="db-card__title">Budget</h3>
         </div>
         <p className="db-empty-note">Not enough data yet to chart spending over time.</p>
-      </div>
+      </Island>
     );
   }
 
@@ -1509,7 +1695,7 @@ function BudgetCard({ points }: { points: BudgetPoint[] }) {
   const path = smoothPath(coords);
 
   return (
-    <div className="db-card">
+    <Island>
       <div className="db-budget-head">
         <h3 className="db-card__title">Budget</h3>
         <button className="db-pill-select" type="button">Month <ChevronDown /></button>
@@ -1541,34 +1727,83 @@ function BudgetCard({ points }: { points: BudgetPoint[] }) {
           </g>
         )}
       </svg>
-    </div>
+    </Island>
   );
 }
 
-function PromoCard({ onLearnMore }: { onLearnMore: () => void }) {
+/* Image-based ad that flips. The front is the ad image (heading, piggy bank
+   and coins are baked into Assets.ts → `promo`); the back explains how the
+   25% is reached. The whole card is the click target — no separate button. */
+const SAVINGS_PLAN: { pct: number; title: string; text: string }[] = [
+  {
+    pct: 8,
+    title: "Subscriptions & memberships",
+    text: "Cancel anything you haven't used in the last 30 days, downgrade plans you rarely max out, and share family plans where you can.",
+  },
+  {
+    pct: 7,
+    title: "Dining & takeaway",
+    text: "Set a weekly cap and cook at home a few more nights. Small swaps add up faster than cutting out meals you enjoy.",
+  },
+  {
+    pct: 6,
+    title: "Impulse & small purchases",
+    text: "Wait 24 hours before buying anything non-essential. Most of the urge passes, and so does the spend.",
+  },
+  {
+    pct: 4,
+    title: "Bills & fees",
+    text: "Renegotiate or switch providers on recurring bills, and avoid late, overdraft and ATM fees.",
+  },
+];
+
+function PromoCard() {
+  const [flipped, setFlipped] = useState(false);
+
   return (
-    <div className="db-promo">
-      <h3 className="db-promo__heading">
-        How to reduce expenses by <span className="db-promo__pill">25%</span>?
-      </h3>
-      <p className="db-promo__body">
-        See where your money actually goes and get a few quick wins for trimming your monthly spend.
-      </p>
-      <div className="db-promo__art">
-        <svg width="140" height="120" viewBox="0 0 140 120" aria-hidden="true" fill="none" stroke="var(--ink)" strokeWidth="2">
-          <ellipse cx="98" cy="82" rx="26" ry="18" />
-          <circle cx="82" cy="70" r="3" fill="var(--ink)" stroke="none" />
-          <path d="M118 80c6-2 10 4 6 8" />
-          <path d="M100 64c2-6 8-8 10-4" />
-          <rect x="20" y="86" width="34" height="10" rx="2" />
-          <rect x="24" y="76" width="26" height="10" rx="2" />
-          <rect x="28" y="66" width="18" height="10" rx="2" />
-          <circle cx="37" cy="60" r="8" />
-        </svg>
+    <div
+      className={`db-promo ${flipped ? "is-flipped" : ""}`}
+      onClick={() => setFlipped((v) => !v)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setFlipped((v) => !v);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-pressed={flipped}
+      aria-label={flipped ? "How to reduce expenses by 25%. Activate to flip back." : "How to reduce expenses by 25%. Activate to see how."}
+    >
+      <div className="db-promo__inner">
+        <div className="db-promo__face db-promo__face--front" aria-hidden={flipped}>
+          <img className="db-promo__img" src={promo} alt="" />
+        </div>
+
+        <div className="db-promo__face db-promo__face--back" aria-hidden={!flipped}>
+          <h3 className="db-promo__back-title">
+            How the <span className="db-promo__pill">25%</span> adds up
+          </h3>
+          <p className="db-promo__back-intro">
+            A suggested split: trim a little from each area rather than a lot from one.
+          </p>
+          <ul className="db-promo__steps">
+            {SAVINGS_PLAN.map((item) => (
+              <li className="db-promo__step" key={item.title}>
+                <span className="db-promo__step-pct">{item.pct}%</span>
+                <div>
+                  <p className="db-promo__step-title">{item.title}</p>
+                  <p className="db-promo__step-text">{item.text}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <p className="db-promo__back-note">
+            Check the Spending chart to see which areas are biggest for you, and start there.
+          </p>
+          <span className="db-promo__flip-hint">Tap to flip back</span>
+        </div>
       </div>
-      <button type="button" className="db-promo__cta" onClick={onLearnMore}>
-        Learn more
-      </button>
     </div>
   );
 }
@@ -1577,13 +1812,19 @@ function PromoCard({ onLearnMore }: { onLearnMore: () => void }) {
    PAGE
    ────────────────────────────────────────────────────────────────────── */
 type LoadStatus = "loading" | "ready" | "error";
-type OpenModal = "addCard" | "addTransaction" | "allTransactions" | "profile" | "savingsTips" | null;
+type OpenModal = "addCard" | "addTransaction" | "allTransactions" | "profile" | null;
 
 export default function Dashboard() {
   const [status, setStatus] = useState<LoadStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<DashboardData | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+
+  // Stack order of the user's cards, front first. Clicking the stack rotates it.
+  const [cardOrder, setCardOrder] = useState<string[]>([]);
+  // Recent transactions per card id, fetched lazily when a card comes to the front.
+  const [recentByCard, setRecentByCard] = useState<Record<string, Transaction[]>>({});
+  const [recentError, setRecentError] = useState<string | null>(null);
 
   const [openModal, setOpenModal] = useState<OpenModal>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -1598,6 +1839,8 @@ export default function Dashboard() {
         const result = await loadDashboardData();
         if (!cancelled) {
           setData(result);
+          setCardOrder(result.cards.map((c) => c.id));
+          setRecentByCard({});
           setStatus("ready");
         }
       } catch (err) {
@@ -1614,20 +1857,73 @@ export default function Dashboard() {
     };
   }, [reloadToken]);
 
-  function handleCardCreated(card: CardSummary) {
-    setData((prev) => (prev ? { ...prev, card } : prev));
+  // Cards in stack order (front first) and the one currently in front.
+  const orderedCards = useMemo(() => {
+    if (!data) return [] as CardSummary[];
+    return cardOrder
+      .map((id) => data.cards.find((c) => c.id === id))
+      .filter((c): c is CardSummary => !!c);
+  }, [data, cardOrder]);
+  const activeCard = orderedCards[0] ?? null;
+  const activeCardId = activeCard?.id ?? null;
+
+  // Fetch the recent transactions of whichever card is in front (once per card).
+  useEffect(() => {
+    if (!activeCardId || recentByCard[activeCardId]) return;
+    let cancelled = false;
+    setRecentError(null);
+
+    async function run() {
+      try {
+        const params = new URLSearchParams({ limit: "8", card_id: activeCardId as string });
+        const result = await apiGet<{ transactions: RawTransaction[] }>(
+          `/transactions?${params.toString()}`,
+        );
+        if (!cancelled) {
+          setRecentByCard((prev) => ({
+            ...prev,
+            [activeCardId as string]: result.transactions.map(mapTransaction),
+          }));
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setRecentError(err instanceof Error ? err.message : "Couldn't load transactions.");
+        }
+      }
+    }
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCardId, recentByCard]);
+
+  const recent = activeCardId ? recentByCard[activeCardId] : undefined;
+  const recentLoading = !!activeCardId && recent === undefined && !recentError;
+
+  function handleCycleCards() {
+    setCardOrder((o) => (o.length > 1 ? [...o.slice(1), o[0]] : o));
   }
 
-  function handleTransactionCreated(tx: Transaction, updatedCard: CardSummary | null) {
-    setData((prev) => {
-      if (!prev) return prev;
-      // Prepend to the (already card-scoped) recent list.
-      const transactions = [tx, ...prev.transactions];
-      // Prefer the card the backend returned inline with the transaction —
-      // it's the real post-transaction balance/creditUsed, not an estimate.
-      const card = updatedCard ?? prev.card;
-      return { ...prev, transactions, card };
-    });
+  function handleCardCreated(card: CardSummary) {
+    setData((prev) => (prev ? { ...prev, cards: [...prev.cards, card] } : prev));
+    // The card you just added comes to the front.
+    setCardOrder((o) => [card.id, ...o.filter((id) => id !== card.id)]);
+  }
+
+  function handleTransactionCreated(tx: Transaction, updatedCard: CardSummary | null, cardId: string) {
+    // Use the card the backend returned inline — it's the real post-transaction
+    // balance/creditUsed, not an estimate.
+    if (updatedCard) {
+      setData((prev) =>
+        prev ? { ...prev, cards: prev.cards.map((c) => (c.id === updatedCard.id ? updatedCard : c)) } : prev,
+      );
+    }
+    // If that card's list is already loaded, prepend. If not, it will be
+    // fetched (and already include this transaction) when it comes forward.
+    setRecentByCard((prev) => (prev[cardId] ? { ...prev, [cardId]: [tx, ...prev[cardId]] } : prev));
+    // Bring the card you posted to forward so the new transaction is visible.
+    setCardOrder((o) => [cardId, ...o.filter((id) => id !== cardId)]);
   }
 
   function handleLogout() {
@@ -1683,12 +1979,19 @@ export default function Dashboard() {
           <div className="db-grid">
             <div className="db-grid__col1">
               <TransactionsCard
-                transactions={data.transactions}
-                cardLast4={data.card?.last4 ?? null}
+                transactions={recent ?? []}
+                loading={recentLoading}
+                error={recentError}
+                cardLast4={activeCard?.last4 ?? null}
                 onViewAll={() => setOpenModal("allTransactions")}
                 onAddTransaction={() => setOpenModal("addTransaction")}
               />
-              <CreditCardWidget card={data.card} onAddCard={() => setOpenModal("addCard")} />
+              <CreditCardWidget
+                cards={data.cards}
+                order={cardOrder}
+                onCycle={handleCycleCards}
+                onAddCard={() => setOpenModal("addCard")}
+              />
             </div>
 
             <div className="db-grid__col2">
@@ -1697,7 +2000,7 @@ export default function Dashboard() {
             </div>
 
             <div className="db-grid__promo">
-              <PromoCard onLearnMore={() => setOpenModal("savingsTips")} />
+              <PromoCard />
             </div>
           </div>
         )}
@@ -1708,29 +2011,21 @@ export default function Dashboard() {
       )}
       {openModal === "addTransaction" && (
         <AddTransactionModal
-          card={data?.card ?? null}
+          cards={orderedCards}
+          defaultCardId={activeCardId}
           onClose={() => setOpenModal(null)}
           onCreated={handleTransactionCreated}
         />
       )}
       {openModal === "allTransactions" && (
         <AllTransactionsModal
-          cardId={data?.card?.id ?? null}
-          cardName={data?.card?.holderCardName ?? null}
+          cardId={activeCard?.id ?? null}
+          cardName={activeCard?.holderCardName ?? null}
           onClose={() => setOpenModal(null)}
         />
       )}
       {openModal === "profile" && data && (
         <ProfileModal user={data.user} onClose={() => setOpenModal(null)} />
-      )}
-      {openModal === "savingsTips" && (
-        <Modal title="Ways to cut expenses" onClose={() => setOpenModal(null)} size="sm">
-          <ul className="db-tips-list">
-            <li>Review subscriptions in your Spending breakdown and cancel what you don't use.</li>
-            <li>Set a weekly budget alert so overspending gets caught early, not at month end.</li>
-            <li>Compare this month's category totals against your average to spot new habits.</li>
-          </ul>
-        </Modal>
       )}
     </div>
   );

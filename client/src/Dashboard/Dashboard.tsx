@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 // NOTE: adjust this path to wherever your Assets.ts actually lives relative to this file.
-import { promo } from "./Assets.promo";
+import { promo } from "../Auth/Assets";
 
 /* ──────────────────────────────────────────────────────────────────────
    CONFIG
@@ -234,6 +234,7 @@ interface BudgetPoint {
 interface DashboardData {
   spending: SpendingCategory[];
   cards: CardSummary[]; // stable order (default first); the stack order lives in Dashboard state
+  summary: { income: number; expense: number }; // this month, from GET /dashboard → month_summary
   budget: BudgetPoint[];
   user: { name: string; initials: string; email: string };
 }
@@ -322,7 +323,12 @@ async function loadDashboardData(): Promise<DashboardData> {
     (email ? email.split("@")[0] : "Account");
   const user = { name: fullName, initials: initialsFromName(fullName), email };
 
-  return { spending, cards, budget, user };
+  const summary = {
+    income: toNumber(dashboard.month_summary?.income),
+    expense: toNumber(dashboard.month_summary?.expense),
+  };
+
+  return { spending, cards, summary, budget, user };
 }
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -468,6 +474,30 @@ const styles = `
 .db-legend__item { display: flex; align-items: center; gap: 6px; }
 .db-legend__swatch { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .db-radar-label { font-size: 11.5px; fill: var(--muted); font-family: inherit; }
+
+/* ── income / expenses / savings donut ── */
+.db-pie-wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.db-pie { width: 100%; max-width: 230px; height: auto; display: block; overflow: visible; }
+.db-pie__label { font-size: 10.5px; font-weight: 700; fill: var(--muted); font-family: inherit; text-transform: uppercase; letter-spacing: 0.08em; }
+.db-pie__value { font-size: 24px; font-weight: 800; fill: var(--ink); font-family: inherit; letter-spacing: -0.02em; }
+.db-pie__sub { font-size: 11px; fill: var(--muted); font-family: inherit; }
+.db-pie__insight { font-size: 13px; line-height: 1.5; color: var(--muted); text-align: center; margin: 0; }
+.db-pie__insight strong { color: var(--ink); font-weight: 700; }
+.db-pie-legend { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.db-pie-legend__row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: 14px;
+  background: #fbfcf8; border: 1px solid var(--line);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.db-pie-legend__row--hoverable { cursor: default; }
+.db-pie-legend__row.is-active { background: #fff; border-color: var(--ink); }
+.db-pie-legend__dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+.db-pie-legend__text { flex: 1; min-width: 0; }
+.db-pie-legend__name { font-size: 13.5px; font-weight: 700; margin: 0; }
+.db-pie-legend__hint { font-size: 12px; color: var(--muted); margin: 2px 0 0; }
+.db-pie-legend__amount { font-size: 14px; font-weight: 700; white-space: nowrap; }
+.db-card__head .db-toggle-btn { padding: 0 14px; }
 
 /* ── credit card widget ── */
 /* stacked cards: every card is absolutely positioned; --pos (0 = front)
@@ -1318,7 +1348,7 @@ function TransactionsCard({
    since the backend doesn't expose a separate weekly-vs-average dataset
    today — it's a relabeled view of the same numbers, not a real week
    slice. ── */
-type SpendingRange = "month" | "week" | "day";
+type SpendingRange = "overview" | "month" | "week" | "day";
 
 function HourlyBarChart({ hours }: { hours: number[] }) {
   const width = 560;
@@ -1375,11 +1405,170 @@ function HourlyBarChart({ hours }: { hours: number[] }) {
   );
 }
 
-function SpendingCard({ categories }: { categories: SpendingCategory[] }) {
-  const [range, setRange] = useState<SpendingRange>("month");
+const usd = (v: number) =>
+  `$${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const usdCompact = (v: number) =>
+  v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${Math.round(v).toLocaleString()}`;
+
+type PieKey = "expense" | "savings";
+
+/* Donut: the whole ring is this month's income, split into what was spent
+   and what was kept. Hover a slice (or its legend row) to read it in the
+   centre. If expenses exceed income the ring is all expenses and a note
+   says by how much. */
+function IncomePie({ income, expense }: { income: number; expense: number }) {
+  const [hover, setHover] = useState<PieKey | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setReady(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const savings = Math.max(0, income - expense);
+  const total = Math.max(income, expense);
+
+  if (total <= 0) {
+    return <p className="db-empty-note">No income or expenses recorded this month yet.</p>;
+  }
+
+  const overspent = expense > income;
+  const pctOfIncome = (v: number) => (income > 0 ? Math.round((v / income) * 100) : null);
+
+  const slices: { key: PieKey; label: string; value: number; color: string }[] = [
+    { key: "expense", label: "Expenses", value: expense, color: "var(--ink)" },
+    { key: "savings", label: "Savings", value: savings, color: "var(--lime)" },
+  ];
+
+  const c = 100;
+  const r = 74;
+  const sw = 22;
+  const C = 2 * Math.PI * r;
+  const gap = 6;
+  const nonZero = slices.filter((sl) => sl.value > 0).length;
+
+  let cursor = 0;
+  const arcs = slices.map((sl) => {
+    const arc = (sl.value / total) * C;
+    const start = cursor;
+    cursor += arc;
+    if (sl.value <= 0) return { ...sl, dash: `0 ${C}`, offset: 0, round: true };
+    if (nonZero === 1) return { ...sl, dash: `${C} 0`, offset: 0, round: false };
+    // rounded caps extend by sw/2 at each end, so shorten the dash to keep a clean gap
+    const len = Math.max(0.01, arc - gap - sw);
+    return { ...sl, dash: `${len} ${C - len}`, offset: -(start + gap / 2 + sw / 2), round: true };
+  });
+
+  const focus = slices.find((sl) => sl.key === hover) ?? null;
+  const centreLabel = focus ? focus.label : "Income";
+  const centreValue = usdCompact(focus ? focus.value : income);
+  const centreSub = focus
+    ? pctOfIncome(focus.value) !== null
+      ? `${pctOfIncome(focus.value)}% of income`
+      : "no income yet"
+    : "this month";
+
+  const savedPct = pctOfIncome(savings);
+
+  return (
+    <div className="db-pie-wrap">
+      <svg
+        className="db-pie"
+        viewBox="0 0 200 200"
+        role="img"
+        aria-label={`This month: income ${usd(income)}, expenses ${usd(expense)}, savings ${usd(savings)}.`}
+      >
+        <circle cx={c} cy={c} r={r} fill="none" stroke="var(--line)" strokeWidth={sw} opacity={0.6} />
+        <g transform={`rotate(-90 ${c} ${c})`}>
+          {arcs.map((a) => (
+            <circle
+              key={a.key}
+              cx={c}
+              cy={c}
+              r={r}
+              fill="none"
+              stroke={a.color}
+              strokeWidth={hover === a.key ? sw + 4 : sw}
+              strokeLinecap={a.round ? "round" : "butt"}
+              strokeDasharray={ready ? a.dash : `0 ${C}`}
+              strokeDashoffset={a.offset}
+              style={{
+                opacity: hover && hover !== a.key ? 0.35 : 1,
+                transition:
+                  "stroke-dasharray 0.9s cubic-bezier(0.3, 0.7, 0.2, 1), stroke-width 0.2s ease, opacity 0.2s ease",
+                cursor: "pointer",
+              }}
+              onMouseEnter={() => setHover(a.key)}
+              onMouseLeave={() => setHover(null)}
+            />
+          ))}
+        </g>
+        <text x={c} y={c - 12} textAnchor="middle" className="db-pie__label">{centreLabel}</text>
+        <text x={c} y={c + 14} textAnchor="middle" className="db-pie__value">{centreValue}</text>
+        <text x={c} y={c + 32} textAnchor="middle" className="db-pie__sub">{centreSub}</text>
+      </svg>
+
+      <ul className="db-pie-legend">
+        <li className="db-pie-legend__row">
+          <span
+            className="db-pie-legend__dot"
+            style={{ background: "conic-gradient(var(--ink) 0 50%, var(--lime) 0)" }}
+          />
+          <div className="db-pie-legend__text">
+            <p className="db-pie-legend__name">Income</p>
+            <p className="db-pie-legend__hint">Total earned this month</p>
+          </div>
+          <span className="db-pie-legend__amount">{usd(income)}</span>
+        </li>
+        {slices.map((sl) => {
+          const pct = pctOfIncome(sl.value);
+          return (
+            <li
+              key={sl.key}
+              className={`db-pie-legend__row db-pie-legend__row--hoverable ${hover === sl.key ? "is-active" : ""}`}
+              onMouseEnter={() => setHover(sl.key)}
+              onMouseLeave={() => setHover(null)}
+            >
+              <span
+                className="db-pie-legend__dot"
+                style={{ background: sl.color, border: sl.key === "savings" ? "1px solid var(--lime-deep)" : "none" }}
+              />
+              <div className="db-pie-legend__text">
+                <p className="db-pie-legend__name">{sl.label}</p>
+                <p className="db-pie-legend__hint">
+                  {sl.key === "expense" ? "Total spent" : "Income left over"}
+                  {pct !== null ? ` · ${pct}% of income` : ""}
+                </p>
+              </div>
+              <span className="db-pie-legend__amount">{usd(sl.value)}</span>
+            </li>
+          );
+        })}
+      </ul>
+
+      <p className="db-pie__insight">
+        {overspent ? (
+          <>You spent <strong>{usd(expense - income)}</strong> more than you earned this month.</>
+        ) : income > 0 ? (
+          <>You kept <strong>{savedPct}%</strong> of your income this month — <strong>{usd(savings)}</strong> saved.</>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+function SpendingCard({
+  categories,
+  summary,
+}: {
+  categories: SpendingCategory[];
+  summary: { income: number; expense: number };
+}) {
+  const [range, setRange] = useState<SpendingRange>("overview");
   const [hourly, setHourly] = useState<number[] | null>(null);
   const [dayError, setDayError] = useState<string | null>(null);
   const [dayLoading, setDayLoading] = useState(false);
+  const isRadar = range === "month" || range === "week";
 
   useEffect(() => {
     if (range !== "day") return;
@@ -1427,35 +1616,24 @@ function SpendingCard({ categories }: { categories: SpendingCategory[] }) {
       <div className="db-card__head">
         <h3 className="db-card__title">Spending</h3>
         <div className="db-toggle-row" style={{ width: "auto" }}>
-          <button
-            type="button"
-            className={`db-toggle-btn ${range === "month" ? "active" : ""}`}
-            onClick={() => setRange("month")}
-          >
-            Month
-          </button>
-          <button
-            type="button"
-            className={`db-toggle-btn ${range === "week" ? "active" : ""}`}
-            onClick={() => setRange("week")}
-          >
-            Week
-          </button>
-          <button
-            type="button"
-            className={`db-toggle-btn ${range === "day" ? "active" : ""}`}
-            onClick={() => setRange("day")}
-          >
-            Day
-          </button>
+          {(["overview", "month", "week", "day"] as SpendingRange[]).map((r) => (
+            <button
+              key={r}
+              type="button"
+              className={`db-toggle-btn ${range === r ? "active" : ""}`}
+              onClick={() => setRange(r)}
+            >
+              {r === "overview" ? "Overview" : r === "month" ? "Month" : r === "week" ? "Week" : "Day"}
+            </button>
+          ))}
         </div>
       </div>
 
-      {range !== "day" && n === 0 && (
+      {isRadar && n === 0 && (
         <p className="db-empty-note">Not enough data yet to chart spending by category.</p>
       )}
 
-      {range !== "day" && n > 0 && (
+      {isRadar && n > 0 && (
         <>
           <div className="db-legend" style={{ marginBottom: 10 }}>
             <span className="db-legend__item">
@@ -1497,6 +1675,8 @@ function SpendingCard({ categories }: { categories: SpendingCategory[] }) {
           </svg>
         </>
       )}
+
+      {range === "overview" && <IncomePie income={summary.income} expense={summary.expense} />}
 
       {range === "day" && (
         <>
@@ -1914,11 +2094,21 @@ export default function Dashboard() {
   function handleTransactionCreated(tx: Transaction, updatedCard: CardSummary | null, cardId: string) {
     // Use the card the backend returned inline — it's the real post-transaction
     // balance/creditUsed, not an estimate.
-    if (updatedCard) {
-      setData((prev) =>
-        prev ? { ...prev, cards: prev.cards.map((c) => (c.id === updatedCard.id ? updatedCard : c)) } : prev,
-      );
-    }
+    // Keep the income/expenses/savings donut in step with the new transaction.
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            cards: updatedCard
+              ? prev.cards.map((c) => (c.id === updatedCard.id ? updatedCard : c))
+              : prev.cards,
+            summary: {
+              income: prev.summary.income + (tx.amount > 0 ? tx.amount : 0),
+              expense: prev.summary.expense + (tx.amount < 0 ? -tx.amount : 0),
+            },
+          }
+        : prev,
+    );
     // If that card's list is already loaded, prepend. If not, it will be
     // fetched (and already include this transaction) when it comes forward.
     setRecentByCard((prev) => (prev[cardId] ? { ...prev, [cardId]: [tx, ...prev[cardId]] } : prev));
@@ -1995,7 +2185,7 @@ export default function Dashboard() {
             </div>
 
             <div className="db-grid__col2">
-              <SpendingCard categories={data.spending} />
+              <SpendingCard categories={data.spending} summary={data.summary} />
               <BudgetCard points={data.budget} />
             </div>
 

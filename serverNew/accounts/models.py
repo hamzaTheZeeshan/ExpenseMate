@@ -4,14 +4,22 @@ from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.db import models
 from django.utils import timezone
 
+from accounts.passwords import hash_password
+
 
 class UserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
+        """
+        `password` is the PLAIN password. It is hashed here with bcrypt
+        (same format and rounds as the Node app). Google users pass no
+        password and are stored with password = NULL.
+        Django's set_password() is NOT used on purpose.
+        The email is stored exactly as given, like Node did.
+        """
         if not email:
             raise ValueError("Email is required")
-        user = self.model(email=self.normalize_email(email), **extra_fields)
-        if password:
-            user.set_password(password)
+        user = self.model(email=email, **extra_fields)
+        user.password = hash_password(password) if password else None
         user.save(using=self._db)
         return user
 

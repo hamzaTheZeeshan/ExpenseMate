@@ -1,21 +1,21 @@
-"""
-URL configuration for config project.
+from django.urls import include, path, re_path
 
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.1/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
-from django.contrib import admin
-from django.urls import path
+from common.views import ApiRootView, RouteNotFoundView
+
+# Everything under /api/v1. Feature routes are added here one app at a time
+# as each is converted (categories, cards, transactions, budgets,
+# analytics, dashboard).
+api_patterns = [
+    path("", ApiRootView.as_view()),
+    path("auth/", include("accounts.urls")),
+]
 
 urlpatterns = [
+    path("api/v1", ApiRootView.as_view()),
+    path("api/v1/", include(api_patterns)),
+    # Must stay last: anything not matched above gets the Node-style 404 JSON.
+    re_path(r"^.*$", RouteNotFoundView.as_view()),
 ]
+
+handler404 = "common.views.handler404"
+handler500 = "common.views.handler500"

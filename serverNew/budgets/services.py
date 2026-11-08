@@ -1,5 +1,4 @@
-import math
-from datetime import datetime, time, timedelta
+from datetime import time, timedelta
 from datetime import timezone as dt_timezone
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -8,11 +7,11 @@ from django.db.models import Q
 from django.utils import timezone
 
 from categories.services import find_category_by_id
-from common.dates import compute_period_end  # <- adjust if your file is named differently
 from common.errors import AppError
 from transactions.services import sum_expenses_for_category_in_range
 
 from .models import Budget
+from .progress import BudgetProgressCalculator
 
 UNIQUE_VIOLATION_SQLSTATE = "23505"
 DUPLICATE_MESSAGE = (
@@ -60,42 +59,19 @@ def _filtered(user_id, filters):
 
 
 # --- Progress ---
-
-
-def _midnight_utc(value):
-    return datetime(value.year, value.month, value.day, tzinfo=dt_timezone.utc)
-
-
-def _js_number(value):
-    """JSON-wise, JavaScript prints 25.0 as 25."""
-    return int(value) if isinstance(value, float) and value.is_integer() else value
+# The calculation itself now lives in budgets/progress.py
+# (BudgetProgressCalculator). This wrapper only plugs in the real database query.
 
 
 def _attach_progress(budget):
-    """
-    Port of withProgress. Sets .spent, .remaining and .percent_used on the
-    instance. Expenses only, occurred_at >= start and < end (EXCLUSIVE end, so
-    an explicit end_date day itself is not counted). Copied exactly.
-    """
-    start = _midnight_utc(budget.start_date)
-    if budget.end_date is not None:
-        end = _midnight_utc(budget.end_date)
-    else:
-        end = compute_period_end(start, budget.period)
-
-    spent = sum_expenses_for_category_in_range(
-        budget.user_id, budget.category_id, start, end
+    """Sets .spent, .remaining and .percent_used on the instance."""
+    calculator = BudgetProgressCalculator(
+        # Looked up at call time, so tests can patch it on this module.
+        lambda user_id, category_id, start, end: sum_expenses_for_category_in_range(
+            user_id, category_id, start, end
+        )
     )
-
-    amount = float(budget.amount)
-    remaining = amount - spent
-    # JavaScript Math.round: round half up, not Python's banker's rounding.
-    percent_used = math.floor(spent / amount * 100 + 0.5) if amount > 0 else 0
-
-    budget.spent = _js_number(spent)
-    budget.remaining = _js_number(remaining)
-    budget.percent_used = int(percent_used)
-    return budget
+    return calculator.attach(budget)
 
 
 def get_budgets(user_id, filters=None):

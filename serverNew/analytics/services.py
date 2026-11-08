@@ -1,19 +1,32 @@
-import math
+"""
+Analytics use cases (spending by category, over time, income vs expense, radar).
+
+REWRITTEN. The old module was one pile of functions that mixed date helpers,
+rounding, category lookups and four use cases, and read the clock and the
+repository directly, so nothing could be tested without a database.
+
+Now the logic lives in AnalyticsService, which gets its collaborators (data
+repository, category lookup, clock, date formatter) through the constructor.
+The module-level get_* functions at the bottom keep the old public interface,
+so views.py and the dashboard app keep working unchanged.
+"""
 
 from django.utils import timezone
 
 from categories.services import get_categories
 from common.dates import add_days
 from common.formatting import iso_datetime
+from common.money import js_number, money, round_currency  # noqa: F401 (re-exported)
 
 from . import repository
 
 RADAR_MONTHS_BACK = 6
 DEFAULT_SPENDING_OVER_TIME_DAYS = 30
+DEFAULT_GRANULARITY = "day"
 UNCATEGORIZED = "Uncategorized"
 
 
-# --- Date helpers ---
+# --- Date helpers (kept public: other apps may import them) ---
 # Node used the SERVER's local timezone. Django's "local" timezone is the
 # TIME_ZONE setting (with USE_TZ = True). Matching Node therefore means
 # TIME_ZONE must equal the timezone the Node server ran in.
@@ -41,112 +54,150 @@ def start_of_next_month(now=None):
     )
 
 
-def round_currency(amount):
-    """JavaScript Math.round(x * 100) / 100: round half up, not banker's rounding."""
-    return math.floor(amount * 100 + 0.5) / 100
+def _null_last(category_id):
+    """Sort key: ids ascending, the 'no category' bucket (None) last."""
+    return (category_id is None, category_id or "")
 
 
-def _json_number(value):
-    """JavaScript prints 25.0 as 25."""
-    return int(value) if isinstance(value, float) and value.is_integer() else value
+class AnalyticsService:
+    """All analytics calculations. Pure logic on top of injected collaborators."""
+
+    def __init__(
+        self,
+        *,
+        repo=None,
+        categories_for=None,
+        clock=None,
+        format_datetime=None,
+        radar_months_back=RADAR_MONTHS_BACK,
+        over_time_days=DEFAULT_SPENDING_OVER_TIME_DAYS,
+    ):
+        # None means "use the real thing", resolved when the service is built.
+        self._repo = repo if repo is not None else repository
+        self._categories_for = categories_for or get_categories
+        self._clock = clock or _now
+        self._format_datetime = format_datetime or iso_datetime
+        self._radar_months_back = radar_months_back
+        self._over_time_days = over_time_days
+
+    # -- small shared pieces ------------------------------------------------
+
+    def _resolve_range(self, start_date, end_date):
+        """Missing bounds default to the current month. The clock is read once."""
+        now = self._clock()
+        return (
+            start_date if start_date is not None else start_of_current_month(now),
+            end_date if end_date is not None else start_of_next_month(now),
+        )
+
+    def _categories_by_id(self, user_id):
+        # The user's categories plus global defaults.
+        return {str(c.id): c for c in self._categories_for(user_id)}
+
+    @staticmethod
+    def _lookup(by_id, category_id):
+        return by_id.get(category_id) if category_id else None
+
+    @staticmethod
+    def _name(category):
+        return category.name if category is not None else UNCATEGORIZED
+
+    # -- use cases ----------------------------------------------------------
+
+    def spending_by_category(self, user_id, start_date=None, end_date=None):
+        start, end = self._resolve_range(start_date, end_date)
+        rows = self._repo.spending_by_category(user_id, start, end)
+        by_id = self._categories_by_id(user_id)
+
+        result = []
+        for row in rows:
+            category = self._lookup(by_id, row["category_id"])
+            result.append(
+                {
+                    "category_id": row["category_id"],
+                    "name": self._name(category),
+                    "color": category.color if category is not None else None,
+                    "amount": money(float(row["total"] or 0)),
+                }
+            )
+        return result
+
+    def spending_over_time(
+        self, user_id, start_date=None, end_date=None, granularity=None
+    ):
+        end = end_date if end_date is not None else self._clock()
+        start = (
+            start_date
+            if start_date is not None
+            else add_days(_to_local(end), -self._over_time_days)
+        )
+        rows = self._repo.spending_over_time(
+            user_id, start, end, granularity or DEFAULT_GRANULARITY
+        )
+        return [
+            {"period": self._format_datetime(r["period"]), "amount": money(r["amount"])}
+            for r in rows
+        ]
+
+    def income_vs_expense(self, user_id, start_date=None, end_date=None):
+        """Public (used by the dashboard). No dates means the current month."""
+        start, end = self._resolve_range(start_date, end_date)
+        totals = self._repo.income_vs_expense(user_id, start, end)
+        income, expense = totals["income"], totals["expense"]
+        return {
+            "income": money(income),
+            "expense": money(expense),
+            "net": money(income - expense),
+        }
+
+    def spending_radar(self, user_id):
+        """This month's spend vs the average of the last N months, per category."""
+        start, end = self._resolve_range(None, None)
+
+        this_month = {
+            row["category_id"]: float(row["total"] or 0)
+            for row in self._repo.spending_by_category(user_id, start, end)
+        }
+        average = {
+            row["category_id"]: row["average"]
+            for row in self._repo.average_spend_by_category(
+                user_id, self._radar_months_back
+            )
+        }
+        by_id = self._categories_by_id(user_id)
+
+        result = []
+        for category_id in sorted(set(this_month) | set(average), key=_null_last):
+            category = self._lookup(by_id, category_id)
+            result.append(
+                {
+                    "category_id": category_id,
+                    "name": self._name(category),
+                    "this_period": money(this_month.get(category_id, 0)),
+                    "average": money(average.get(category_id, 0)),
+                }
+            )
+        return result
 
 
-def _money(value):
-    return _json_number(round_currency(value))
-
-
-def _categories_by_id(user_id):
-    # The user's categories plus global defaults.
-    return {str(category.id): category for category in get_categories(user_id)}
-
-
-def _category_name(category):
-    return category.name if category is not None else UNCATEGORIZED
-
-
-# --- Use cases ---
+# --- Public functions: same names and signatures as before the rewrite ---
+# A new service is built per call so the real repository / clock are looked up
+# fresh (and so tests can still patch this module if they prefer to).
 
 
 def get_spending_by_category(user_id, start_date=None, end_date=None):
-    range_start = start_date if start_date is not None else start_of_current_month()
-    range_end = end_date if end_date is not None else start_of_next_month()
-
-    rows = repository.spending_by_category(user_id, range_start, range_end)
-    by_id = _categories_by_id(user_id)
-
-    result = []
-    for row in rows:
-        category = by_id.get(row["category_id"]) if row["category_id"] else None
-        result.append(
-            {
-                "category_id": row["category_id"],
-                "name": _category_name(category),
-                "color": category.color if category is not None else None,
-                "amount": _money(float(row["total"] or 0)),
-            }
-        )
-    return result
+    return AnalyticsService().spending_by_category(user_id, start_date, end_date)
 
 
 def get_spending_over_time(user_id, start_date=None, end_date=None, granularity=None):
-    range_end = end_date if end_date is not None else _now()
-    range_start = (
-        start_date
-        if start_date is not None
-        else add_days(_to_local(range_end), -DEFAULT_SPENDING_OVER_TIME_DAYS)
+    return AnalyticsService().spending_over_time(
+        user_id, start_date, end_date, granularity
     )
-    unit = granularity or "day"
-
-    rows = repository.spending_over_time(user_id, range_start, range_end, unit)
-    return [
-        {"period": iso_datetime(row["period"]), "amount": _money(row["amount"])}
-        for row in rows
-    ]
 
 
 def get_income_vs_expense(user_id, start_date=None, end_date=None):
-    """Public (used by the dashboard). No dates means the current month."""
-    range_start = start_date if start_date is not None else start_of_current_month()
-    range_end = end_date if end_date is not None else start_of_next_month()
-
-    totals = repository.income_vs_expense(user_id, range_start, range_end)
-    income, expense = totals["income"], totals["expense"]
-    return {
-        "income": _money(income),
-        "expense": _money(expense),
-        "net": _money(income - expense),
-    }
+    return AnalyticsService().income_vs_expense(user_id, start_date, end_date)
 
 
 def get_spending_radar(user_id):
-    now = _now()
-    range_start = start_of_current_month(now)
-    range_end = start_of_next_month(now)
-
-    this_month = {
-        row["category_id"]: float(row["total"] or 0)
-        for row in repository.spending_by_category(user_id, range_start, range_end)
-    }
-    average = {
-        row["category_id"]: row["average"]
-        for row in repository.average_spend_by_category(user_id, RADAR_MONTHS_BACK)
-    }
-    by_id = _categories_by_id(user_id)
-
-    # Deterministic order: category_id ascending, nulls last.
-    category_ids = sorted(
-        set(this_month) | set(average), key=lambda cid: (cid is None, cid or "")
-    )
-
-    result = []
-    for category_id in category_ids:
-        category = by_id.get(category_id) if category_id else None
-        result.append(
-            {
-                "category_id": category_id,
-                "name": _category_name(category),
-                "this_period": _money(this_month.get(category_id, 0)),
-                "average": _money(average.get(category_id, 0)),
-            }
-        )
-    return result
+    return AnalyticsService().spending_radar(user_id)

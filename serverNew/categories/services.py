@@ -26,6 +26,11 @@ def _find_by_id(category_id):
         return None
 
 
+def find_category_by_id(category_id):
+    """Returns the Category or None. No ownership check (public, for other apps)."""
+    return _find_by_id(category_id)
+
+
 def _assert_editable(user_id, category_id):
     category = _find_by_id(category_id)
 

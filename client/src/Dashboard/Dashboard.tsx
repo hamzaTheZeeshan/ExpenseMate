@@ -5,7 +5,7 @@ import { promo } from "./Assets.promo";
 /* ──────────────────────────────────────────────────────────────────────
    CONFIG
    ────────────────────────────────────────────────────────────────────── */
-const API_BASE_URL = "https://expense-mate-zmxv.vercel.app/api/v1"; // matches SignIn.tsx / SignUp.tsx
+const API_BASE_URL = "https://expense-mate-omega.vercel.app/api/v1"; // matches SignIn.tsx / SignUp.tsx
 
 // How much history to pull for the budget/spend-over-time line chart.
 const BUDGET_TIMELINE_DAYS_BACK = 56; // ~8 weeks

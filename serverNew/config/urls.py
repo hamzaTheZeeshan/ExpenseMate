@@ -13,6 +13,8 @@ api_patterns = [
 urlpatterns = [
     path("api/v1", ApiRootView.as_view()),
     path("api/v1/", include(api_patterns)),
+    path("api/v1/", include("categories.urls")),  
+    path("api/v1/", include("cards.urls")),  
     # Must stay last: anything not matched above gets the Node-style 404 JSON.
     re_path(r"^.*$", RouteNotFoundView.as_view()),
 ]
